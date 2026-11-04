@@ -147,9 +147,12 @@ write_report(plan("."), "order.xlsx")
    `github-pages` защищено правилами веток, разрешите публикацию из `main`.
 2. Для пояснений откройте **Settings → Secrets and variables → Actions** и
    добавьте секрет репозитория `EXPLABS_API_KEY`. По умолчанию используется
-   `claude-sonnet-5.5`. Модель можно изменить переменной `EXPLABS_MODEL`.
-   Без ключа или при сбое шлюза дашборд публикуется без пояснений.
-   [Документация Experiential](https://platform.experientiallabs.ai/docs)
+   `claude-sonnet-5`. Модель можно изменить переменной `EXPLABS_MODEL`.
+   Пояснения запрашиваются пакетами до 40 SKU одного поставщика, сводка
+   изменений — отдельно. Публикуются фразы, которые прошли проверку. Без
+   ключа дашборд собирается без пояснений. В выводе запуска и `run.json`
+   видны количество пояснённых SKU и причины пропусков.
+   [Каталог Experiential](https://platform.experientiallabs.ai/models/claude-sonnet-5)
 3. Загрузите все шесть CSV и `export_meta.json` в `inbox/` ветки `main` одним
    коммитом. Используйте только обезличенную выгрузку. Для пересчёта выберите
    **Actions → План закупок и Pages → Run workflow → main**.

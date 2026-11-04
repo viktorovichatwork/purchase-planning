@@ -14,7 +14,7 @@ from purchase_planning.backtest import run_backtest
 from purchase_planning.calibration import BACKTEST_FILENAME, stock_multiplier
 from purchase_planning.comparison import compare, comparison_evidence, summarize
 from purchase_planning.dashboard import write_dashboard
-from purchase_planning.explanations import explain, gateway
+from purchase_planning.explanations import ExplanationStats, explain, gateway
 from purchase_planning.export import REQUIRED_COLUMNS, ExportValidationError
 from purchase_planning.facts import PlanFacts, Segment
 from purchase_planning.order_sheet import displayed_order_qty
@@ -144,13 +144,13 @@ def run_plan(
         _write_json(staging / "parameters.json", parameters)
         _write_json(staging / "evidence.json", evidence)
         _write_json(staging / "diff.json", {"previous_run": previous.name if previous else None, "changes": changes})
+        write_report(facts, staging / "report.xlsx", run_date=run_date, parameters=parameters)
+        explanations, llm_stats = explain(facts, changes, gateway(stub=stub_llm))
         _write_json(staging / "run.json", {
             "started_at": started_at.isoformat(), "run_date": run_date.isoformat(),
             "input_sha256": input_hash, "source_revision": source_revision, "code_revision": code_revision,
-            "workflow_run": workflow_run,
+            "workflow_run": workflow_run, "llm": asdict(llm_stats),
         })
-        write_report(facts, staging / "report.xlsx", run_date=run_date, parameters=parameters)
-        explanations = explain(facts, changes, gateway(stub=stub_llm))
         write_dashboard(
             facts, staging / "index.html", run_date=run_date,
             previous_run=previous.name if previous else None, changes=changes, explanations=explanations,
@@ -190,6 +190,8 @@ def main() -> int:
     print(f"Отчёт: {result / 'report.xlsx'}")
     print(f"Страница: {result / 'index.html'}")
     print(summarize(diff["previous_run"], diff["changes"]))
+    if llm_stats := _read_json(result / "run.json").get("llm"):
+        print(ExplanationStats(**llm_stats).message())
     return 0
 
 

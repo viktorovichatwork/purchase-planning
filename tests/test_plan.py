@@ -1,5 +1,6 @@
 import csv
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -55,7 +56,7 @@ def test_publication_retains_history_and_rejects_bad_exports(export, monkeypatch
         return subprocess.run(
             [sys.executable, "-m", "purchase_planning.runs", str(export), "--stub-llm",
              "--history-dir", str(history), "--site-dir", str(export / name), *options],
-            capture_output=True,
+            capture_output=True, env={**os.environ, "PYTHONUTF8": "1"},
         )
 
     first = publish("site-1", "--reject-duplicate")
@@ -80,6 +81,10 @@ def test_publication_retains_history_and_rejects_bad_exports(export, monkeypatch
     metadata = json.loads((history / "000002" / "run.json").read_text(encoding="utf-8"))
     assert (metadata["source_revision"], metadata["code_revision"]) == ("export-sha", "code-sha")
     assert len(metadata["input_sha256"]) == 64
+    assert metadata["llm"]["explained_skus"] == 0
+    assert metadata["llm"]["discarded_skus"] == 1
+    assert metadata["llm"]["discarded_by_reason"] == {"stub": 1}
+    assert "SKU с пояснением — 0, отброшено — 1 (заглушка — 1)" in second.stdout.decode("utf-8")
 
     monkeypatch.setenv("GITHUB_RUN_ID", "3")
     (export / "sales_monthly.csv").write_text("", encoding="utf-8")
