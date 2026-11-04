@@ -206,7 +206,7 @@ def test_analytics_terms_have_descriptions(tmp_path):
     write_dashboard(facts, dashboard, run_date=day, previous_run=None, changes=[])
 
     page = ElementTree.fromstring(dashboard.read_text(encoding="utf-8").split("\n", 1)[1])
-    for section, count in (("forecast-quality", 2), ("stock", 3), ("segments", 5), ("order-flags", 3)):
+    for section, count in (("forecast-quality", 2), ("stock", 3), ("segments", 5), ("order-flags", 4)):
         node = page.find(f".//section[@id='{section}']")
         descriptions = {hint.attrib["id"]: hint.text for hint in node.findall(".//span[@role='tooltip']")}
         buttons = node.findall(".//button[@aria-describedby]")

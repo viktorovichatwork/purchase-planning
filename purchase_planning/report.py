@@ -8,7 +8,7 @@ from openpyxl.styles import Font
 from openpyxl.worksheet.worksheet import Worksheet
 
 from purchase_planning.calibration import METRIC_HEADERS, stock_multiplier
-from purchase_planning.facts import OrderFlag, PlanFacts, Recommendation, Segment
+from purchase_planning.facts import UNCONFIRMED_ORDERS_LABEL, OrderFlag, PlanFacts, Recommendation, Segment
 from purchase_planning.order_sheet import (
     coverage_text, displayed_order_qty, excess_rows, order_date_label, rounded_quantity, stock_below_reorder_point,
     stockout_rows, supplier_orders,
@@ -51,7 +51,10 @@ def write_report(
     sheet = workbook.active
     assert sheet is not None
     sheet.title = "Заказ по поставщикам"
-    sheet.append(("Дата среза", facts.cutoff.isoformat()))
+    cutoff_label = facts.cutoff.isoformat()
+    if facts.cutoff_is_estimated:
+        cutoff_label = f"≈ {facts.cutoff:%d.%m.%Y} · {facts.cutoff_source}"
+    sheet.append(("Дата среза", cutoff_label))
     status = STALE_EXPORT_STATUS if (run_date - facts.cutoff).days > STALE_EXPORT_DAYS else None
     sheet.append(("Статус", status))
     if facts.cutoff_source:
@@ -182,7 +185,7 @@ def write_report(
     _append_backtest(workbook.create_sheet("Бэктест"), facts)
     parameter_sheet = workbook.create_sheet("Параметры")
     parameter_sheet.append(("Параметр", "Значение"))
-    parameter_sheet.append(("Дата среза", facts.cutoff.isoformat()))
+    parameter_sheet.append(("Дата среза", cutoff_label))
     if facts.cutoff_source:
         parameter_sheet.append(("Как определена дата среза", facts.cutoff_source))
     parameter_sheet.append(("Дата расчёта", facts.as_of.isoformat()))
@@ -215,9 +218,10 @@ def _append_inventory_sheets(workbook: Workbook, facts: PlanFacts, labels: Mappi
     risks.append(("SKU", "Товар", "Поставщик", "Остаток", "В пути", "Хватит до", "Приход при заказе сегодня",
                   "Дней без товара", "Упущенные продажи, шт."))
     summary = workbook.create_sheet("Сводка")
-    summary.append(("Показатель", "SKU"))
+    summary.append(("Показатель", "Количество"))
     for name, count in inventory_summary(facts).items():
         summary.append((name, count))
+    summary.append((UNCONFIRMED_ORDERS_LABEL, facts.unconfirmed_order_lines))
 
     for row in sorted(facts.recommendations, key=lambda row: (row.category, row.supplier_id, row.sku_id)):
         season = row.seasonal_order

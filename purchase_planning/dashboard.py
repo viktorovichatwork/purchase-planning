@@ -9,7 +9,7 @@ from pathlib import Path
 from purchase_planning.comparison import Change, summarize
 from purchase_planning.explanations import Explanations
 from purchase_planning.export import REQUIRED_COLUMNS
-from purchase_planning.facts import OrderFlag, PlanFacts, Recommendation, Segment
+from purchase_planning.facts import UNCONFIRMED_ORDERS_LABEL, OrderFlag, PlanFacts, Recommendation, Segment
 from purchase_planning.order_sheet import (
     coverage_text, displayed_order_qty, excess_rows, order_date_label, rounded_quantity, stock_below_reorder_point,
     stockout_rows, supplier_orders,
@@ -40,6 +40,8 @@ _SEGMENT_HINTS = {
 _FLAG_HINTS = {
     OrderFlag.STUCK: "Заказ давно просрочен, существенная часть не пришла. "
                      "Уточните у поставщика, будет ли поставка. Пока её не учитывают в пути.",
+    OrderFlag.UNCONFIRMED: "Подтверждённое поставщиком количество равно нулю. "
+                         "Такие строки учитываются в пути по общим правилам.",
     OrderFlag.TAIL: "Основная часть давно просроченного заказа пришла. "
                     "Небольшой остаток не учитывают в пути. Проверьте, можно ли закрыть заказ.",
     OrderFlag.RESCHEDULE: "По SKU есть избыток и открытый заказ. "
@@ -348,6 +350,7 @@ def _decision(
         ("Поставщиков пора заказывать", due),
         ("К заказу сейчас, шт.", units_now),
         ("SKU в риске дефицита", len(stockout_rows(facts))),
+        (UNCONFIRMED_ORDERS_LABEL, facts.unconfirmed_order_lines),
     )
     additional = (
         ("Поставщиков в следующие 30 дней", soon),
@@ -496,7 +499,8 @@ def _backtest_quality(facts: PlanFacts) -> str:
     ))
     context = (
         '<p class="meta">Проверяем прогноз на прошлых периодах. Каждое окно охватывает плечо поставки '
-        'и цикл заказа поставщика. В расчёт входят только окна с полными данными и без дефицитных месяцев.</p>'
+        'и цикл заказа поставщика. Факт считаем по чистым продажам. '
+        'В расчёт входят только окна с полными данными и без дефицитных месяцев.</p>'
     )
     breakdown = _table(
         "Бэктест по группам",
@@ -518,6 +522,7 @@ def write_dashboard(
     stale = age > STALE_EXPORT_DAYS
     status = STALE_EXPORT_STATUS if stale else "Актуально"
     status_class = "draft" if stale else "current"
+    cutoff_prefix = "≈ " if facts.cutoff_is_estimated else ""
     cutoff_note = f" · {escape(facts.cutoff_source)}" if facts.cutoff_source else ""
     warnings = f"<p>{escape(facts.supply_warning)}</p>" if facts.supply_warning else ""
     inventory = _hint_list(
@@ -697,7 +702,7 @@ ul {{ margin: 0; padding-left: 1.25rem; }}
 <header>
 <div>
 <h1>План закупок</h1>
-<p class="meta">Срез <time datetime="{facts.cutoff.isoformat()}">{facts.cutoff:%d.%m.%Y}</time>{cutoff_note} · {days_text(age)} на дату запуска</p>
+<p class="meta">Срез {cutoff_prefix}<time datetime="{facts.cutoff.isoformat()}">{facts.cutoff:%d.%m.%Y}</time>{cutoff_note} · {days_text(age)} на дату запуска</p>
 </div>
 <nav class="actions" aria-label="Действия с отчётом">
 <a class="download" href="report.xlsx" download="report.xlsx">Скачать XLSX</a>
@@ -745,7 +750,7 @@ ul {{ margin: 0; padding-left: 1.25rem; }}
 <li>
 <h3>Проверьте результат</h3>
 <p>Откройте <a href="{_REPOSITORY_URL}/actions/workflows/publish.yml">страницу расчётов в GitHub Actions</a>. Когда новый запуск завершится успешно, обновите портал и сверьте дату среза.</p>
-<p>Портал сравнивает конец последнего полного месяца продаж с датами последнего прихода и последнего заказа. Самая поздняя дата становится датой среза.</p>
+<p>Портал оценивает дату среза по объёму продаж неполного месяца. Если данных для оценки не хватает, берётся конец последнего полного месяца. В обоих случаях срез не раньше последнего прихода и заказа.</p>
 </li>
 </ol>
 <p><a href="#guide">Вернуться к инструкции по работе с порталом</a></p>

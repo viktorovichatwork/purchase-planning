@@ -3,6 +3,10 @@ from datetime import date
 from enum import StrEnum
 
 
+ESTIMATED_CUTOFF_SOURCE = "оценка по продажам неполного месяца"
+UNCONFIRMED_ORDERS_LABEL = "Не подтверждены поставщиком, строк заказов"
+
+
 class Segment(StrEnum):
     DEAD = "Мёртвые"
     SLEEPING = "Спящие"
@@ -14,6 +18,7 @@ class Segment(StrEnum):
 class OrderFlag(StrEnum):
     STUCK = "Зависший заказ"
     TAIL = "Хвост заказа"
+    UNCONFIRMED = "Не подтверждён поставщиком"
     RESCHEDULE = "Перенести/отменить открытый заказ"
 
 
@@ -173,6 +178,11 @@ class PlanFacts:
     supply_warning: str | None = None
     backtest: BacktestResult | None = None
     backtest_warning: str | None = None
+    unconfirmed_order_lines: int = 0
+
+    @property
+    def cutoff_is_estimated(self) -> bool:
+        return self.cutoff_source == ESTIMATED_CUTOFF_SOURCE
 
     def __post_init__(self) -> None:
         if any(len(row.monthly_forecast) != len(self.forecast_months) for row in self.recommendations):
