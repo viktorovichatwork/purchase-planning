@@ -10,8 +10,34 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Проверить workflow
+        run: |
+          gh release download v1.7.12 --repo rhysd/actionlint --pattern '*_linux_amd64.tar.gz'
+          tar -xzf actionlint_1.7.12_linux_amd64.tar.gz actionlint
+          # Upstream actionlint #657: GitHub supports concurrency.queue already.
+          ./actionlint -ignore 'unexpected key "queue" for "concurrency" section'
+        env:
+          GH_TOKEN: ${{ github.token }}
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
       - run: python -m pip install ".[test]"
       - run: python -m pytest
+      - name: Проверить бэктест полной выгрузки
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          from purchase_planning.backtest import run_backtest
+
+          saved = json.loads(Path("backtest.json").read_text(encoding="utf-8"))
+          baseline = next(row["wape"] for row in saved["metrics"] if row["breakdown"] == row["group"] == "Все")
+          metric = next(row for row in run_backtest(".").metrics if row.breakdown == row.group == "Все")
+          assert metric.wape is not None and metric.wape <= baseline + 0.02, metric
+          assert metric.bias is not None and abs(metric.bias) <= 0.05, metric
+          PY
+      - run: python -m purchase_planning.runs tests/fixtures/export --stub-llm --refresh-backtest --site-dir _site
+      - uses: actions/upload-artifact@v4
+        with:
+          name: purchase-dashboard
+          path: _site/

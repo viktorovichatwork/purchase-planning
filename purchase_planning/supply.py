@@ -6,6 +6,7 @@ from statistics import median, quantiles
 
 from purchase_planning.export import ExportValidationError, finite_quantity
 from purchase_planning.facts import OrderFlag, SupplierTiming
+from purchase_planning.wording import days_text
 
 LEAD_HISTORY_START = date(2025, 1, 1)
 MIN_ORDERS = 5
@@ -171,7 +172,7 @@ def _supplier_timing(
     if cycle is None:
         flags.append("Нет истории для цикла")
     elif not MIN_CYCLE_DAYS <= cycle <= MAX_CYCLE_DAYS:
-        flags.append(f"цикл ограничен (было {cycle:g} дней)")
+        flags.append(f"цикл ограничен (было {days_text(cycle)})")
         cycle = min(MAX_CYCLE_DAYS, max(MIN_CYCLE_DAYS, cycle))
     return SupplierTiming(lead_days, source, ceil(cycle) if cycle is not None else None, tuple(flags))
 

@@ -153,12 +153,9 @@ def plan_inventory(
     can_order = purchase_segment and known_supplier
     stock_until = projection.first_stockout if purchase_segment else None
     position = inventory.stock + fsum(inventory.arrivals.values())
-    coverage_end = start + timedelta(days=timing.horizon_days) if timing.horizon_days else annual_end
-    horizon_demand = inventory.demand(start, coverage_end)
-    coverage = None
-    if horizon_demand > 0:
-        months = fsum(share for _, share in month_shares(start, coverage_end))
-        coverage = position * months / horizon_demand
+    depletion = projection.first_stockout
+    coverage_end = depletion + DAY if depletion is not None else end
+    coverage = fsum(share for _, share in month_shares(start, coverage_end)) if inventory.annual_demand > 0 else None
 
     threshold = inventory.demand(start, annual_end)
     season_start, season_end = inventory.season_window(as_of) if inventory.profile.is_seasonal else (None, None)
@@ -243,7 +240,7 @@ def plan_inventory(
         row, order_qty=regular_qty + seasonal_qty, order_flags=order_flags, sku_flags=sku_flags, segment=segment,
         arrival_date=arrival, stock_at_arrival=projection.stock_at_snapshot if arrival is not None else None,
         target_stock=target.target_stock if target else None, safety_stock=target.safety_stock if target else None,
-        coverage_months=coverage, stock_until=stock_until, order_by=order_by,
+        coverage_months=coverage, stock_until=depletion if coverage is not None else stock_until, order_by=order_by,
         stockout_risk=stockout_risk, stockout_days=projection.stockout_days_at_snapshot if stockout_risk else 0,
         lost_sales=projection.lost_sales_at_snapshot if stockout_risk else 0.0,
         excess_threshold=threshold, excess=excess, seasonal_order=seasonal_order,
@@ -256,7 +253,8 @@ def inventory_summary(facts: PlanFacts) -> dict[str, int]:
     rows = facts.recommendations
     return {
         "Покрытие 6–12 мес": sum(
-            row.coverage_months is not None and SLOW_COVERAGE_MONTHS <= row.coverage_months <= EXCESS_MONTHS
+            row.stock_until is not None and row.coverage_months is not None
+            and SLOW_COVERAGE_MONTHS <= row.coverage_months <= EXCESS_MONTHS
             for row in rows
         ),
         "Избыток": sum(row.excess for row in rows),

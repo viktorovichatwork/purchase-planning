@@ -1,0 +1,2 @@
+po_id,sku_id,supplier_id,supply_type,order_date,promised_date,planned_lead_days,status,qty_ordered,qty_confirmed,qty_received,qty_pending
+PO-1,SKU-1,SUP-1,import,2026-01-01,2026-07-01,181,completed,10,10,10,0

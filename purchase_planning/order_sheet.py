@@ -4,6 +4,8 @@ from math import ceil, isclose
 
 from purchase_planning.facts import PlanFacts, Recommendation
 
+SupplierOrder = tuple[str, list[Recommendation], int]
+
 
 def rounded_quantity(quantity: float, multiple: int) -> int:
     packs = quantity / multiple
@@ -21,13 +23,28 @@ def displayed_order_qty(row: Recommendation) -> int:
     return rounded_quantity(row.order_qty, row.order_multiple)
 
 
-def order_date_label(day: date, as_of: date, *, date_format: str = "%Y-%m-%d") -> str:
-    if day < as_of:
-        return f"Сейчас (опоздание {(as_of - day).days} дней)"
-    return "Сейчас" if day == as_of else day.strftime(date_format)
+def order_date_label(
+    day: date, as_of: date, *, date_format: str = "%Y-%m-%d", below_reorder_point: bool = False,
+) -> str:
+    if day > as_of:
+        return day.strftime(date_format)
+    return "Сейчас · запас ниже точки заказа" if below_reorder_point else "Сейчас"
 
 
-def supplier_orders(facts: PlanFacts) -> list[tuple[str, list[Recommendation], int]]:
+def stock_below_reorder_point(row: Recommendation) -> bool:
+    return row.stock_at_calculation <= 0 or (
+        row.stock_until is not None and row.arrival_date is not None and row.stock_until < row.arrival_date
+    )
+
+
+def coverage_text(row: Recommendation) -> str:
+    if row.coverage_months is None:
+        return "Нет прогноза"
+    prefix = "> " if row.stock_until is None else ""
+    return prefix + f"{row.coverage_months:.1f}".replace(".", ",")
+
+
+def supplier_orders(facts: PlanFacts) -> list[SupplierOrder]:
     due = {supplier.supplier_id for supplier in facts.suppliers if supplier.time_to_order}
     rows = sorted(
         (row for row in facts.recommendations if row.order_qty > 0),
@@ -38,3 +55,17 @@ def supplier_orders(facts: PlanFacts) -> list[tuple[str, list[Recommendation], i
         lines = list(group)
         orders.append((supplier, lines, sum(displayed_order_qty(row) for row in lines)))
     return orders
+
+
+def stockout_rows(facts: PlanFacts) -> list[Recommendation]:
+    return sorted(
+        (row for row in facts.recommendations if row.stockout_risk),
+        key=lambda row: (row.stock_until or date.max, -row.lost_sales, row.sku_id),
+    )
+
+
+def excess_rows(facts: PlanFacts) -> list[Recommendation]:
+    return sorted(
+        (row for row in facts.recommendations if row.excess),
+        key=lambda row: (-(row.coverage_months or 0) * (row.price_decile or 0), row.sku_id),
+    )

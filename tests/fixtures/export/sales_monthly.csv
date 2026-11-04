@@ -1,0 +1,4 @@
+sku_id,category,month,qty_sold,qty_returned,orders_cnt,markup_pct,partial_month
+SKU-1,tools,2026-06,10,0,1,30,0
+SKU-1,tools,2026-07,30,0,1,30,0
+SKU-1,tools,2026-08,880,0,1,30,1

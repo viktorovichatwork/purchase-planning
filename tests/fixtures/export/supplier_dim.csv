@@ -1,0 +1,2 @@
+supplier_id,supply_type,receipts_cnt,skus,median_days_between_receipts,median_planned_lead_days
+SUP-1,import,1,1,,181
