@@ -51,10 +51,13 @@ def test_dashboard_matches_workbook_and_displays_facts(tmp_path):
     visible_text = "".join(page.itertext())
     assert page.find(".//a[@href='#guide']") is not None
     assert page.find(".//section[@id='guide']/h2").text == "Как работать с порталом"
-    assert page.find(".//header//a[@href='#upload']") is not None
-    assert page.find(".//section[@id='guide']/h3[@id='upload']") is not None
-    assert any(link.attrib["href"].endswith("/tree/main/inbox") for link in page.findall(".//section[@id='guide']//a"))
-    guide_files = {node.text for node in page.findall(".//section[@id='guide']//li/code")}
+    assert page.find(".//header//a[@href='#upload']").text == "Обновить выгрузку ERP"
+    upload = page.find(".//section[@id='upload']")
+    assert page.find(".//section[@id='guide']//a[@href='#upload']") is not None
+    assert upload.find(".//input[@name='cutoff_date']").attrib["type"] == "date"
+    assert upload.find(".//a[@download='export_meta.json']") is not None
+    assert any(link.get("href", "").endswith("/tree/main/inbox") for link in upload.findall(".//a"))
+    guide_files = {node.text for node in upload.findall(".//code")}
     assert {*(f"{name}.csv" for name in REQUIRED_COLUMNS), "export_meta.json"} <= guide_files
     assert "Черновик, не размещать" not in visible_text
     for value in ("13.08.2026", "36 дней", "Устаревшая выгрузка", "Первый запуск",

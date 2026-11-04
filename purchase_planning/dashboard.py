@@ -136,6 +136,21 @@ document.addEventListener("keydown", (event) => {
     }
 });
 
+const cutoffPicker = document.getElementById("cutoff-picker");
+const cutoffInput = cutoffPicker.querySelector("input");
+const cutoffDownload = cutoffPicker.querySelector("a");
+cutoffInput.addEventListener("input", () => {
+    if (!cutoffInput.validity.valid) {
+        cutoffDownload.removeAttribute("href");
+        cutoffDownload.setAttribute("aria-disabled", "true");
+        return;
+    }
+    const contents = JSON.stringify({ cutoff_date: cutoffInput.value }, null, 2) + "\\n";
+    cutoffDownload.href = "data:application/json;charset=utf-8," + encodeURIComponent(contents);
+    cutoffDownload.removeAttribute("aria-disabled");
+});
+cutoffPicker.hidden = false;
+
 const views = Array.from(document.querySelectorAll("[data-view]"));
 const nav = document.querySelector(".workspace-nav");
 const links = Array.from(nav.querySelectorAll("a"));
@@ -550,9 +565,9 @@ def write_dashboard(
         f'<section id="{key}"><h3>{title}</h3>{body}</section>' for key, title, body in diagnostics
     )
     history_link = '<a href="history.html">История запусков</a>' if previous_run else ""
+    upload_link = '<a class="upload-action" href="#upload">Обновить выгрузку ERP</a>'
     stale_note = (
-        '<span>Перед размещением заказа загрузите свежую выгрузку ERP. '
-        '<a href="#upload">Как загрузить</a></span>' if stale else ""
+        f'<span>Перед размещением заказа обновите данные.</span>{upload_link}' if stale else ""
     )
     csv_files = ", ".join(f"<code>{table}.csv</code>" for table in REQUIRED_COLUMNS)
     path.write_text(
@@ -600,9 +615,14 @@ section {{ margin-top: 1.5rem; }}
 p {{ margin: .5rem 0; }}
 p:not(.empty) {{ max-width: 75ch; }}
 .meta {{ color: var(--muted); }}
-.freshness {{ flex-basis: 100%; display: flex; flex-wrap: wrap; gap: .15rem .75rem; padding: .65rem .9rem; border-radius: .5rem; }}
+.freshness {{ flex-basis: 100%; display: flex; align-items: center; flex-wrap: wrap; gap: .15rem .75rem; padding: .65rem .9rem; border-radius: .5rem; }}
 .draft {{ background: var(--draft-bg); color: var(--draft); }}
 .draft a {{ color: inherit; font-weight: 650; }}
+.upload-action {{ display: inline-flex; align-items: center; min-height: 44px; }}
+.freshness .upload-action {{
+    padding: 0 .75rem; border: 1px solid currentColor; border-radius: .4rem; text-decoration: none;
+}}
+.freshness .upload-action:hover {{ text-decoration: underline; }}
 .current {{ color: var(--accent); background: var(--subtle); }}
 a {{ color: var(--accent); text-underline-offset: .2em; }}
 .actions {{ display: flex; align-items: center; flex-wrap: wrap; gap: .25rem 1rem; }}
@@ -676,6 +696,12 @@ ul {{ margin: 0; padding-left: 1.25rem; }}
 .guide ol {{ margin: 0; padding-left: 1.25rem; }}
 .guide li + li {{ margin-top: .4rem; }}
 .guide li a {{ display: inline; }}
+.upload-steps > li + li {{ margin-top: 1.15rem; }}
+.upload-steps h3 {{ margin: 0 0 .35rem; }}
+.cutoff-picker {{ display: flex; align-items: end; flex-wrap: wrap; gap: .6rem .75rem; margin: .75rem 0; }}
+.cutoff-picker label {{ display: grid; gap: .25rem; font-size: .875rem; font-weight: 650; }}
+.cutoff-picker a.download {{ display: inline-flex; align-items: center; min-height: 44px; }}
+.cutoff-picker a[aria-disabled] {{ background: var(--subtle); color: var(--muted); }}
 @media (max-width: 40rem) {{
     h1 {{ font-size: 1.65rem; }}
     .decision {{ gap: 0 .6rem; }}
@@ -697,6 +723,7 @@ ul {{ margin: 0; padding-left: 1.25rem; }}
 <nav class="actions" aria-label="Действия с отчётом">
 <a class="download" href="report.xlsx" download="report.xlsx">Скачать XLSX</a>
 {history_link}
+{upload_link if not stale else ""}
 <a href="#guide">Как работать с порталом</a>
 </nav>
 <div class="freshness {status_class}"><strong>{status}</strong>{stale_note}</div>
@@ -718,18 +745,45 @@ ul {{ margin: 0; padding-left: 1.25rem; }}
 <h2>Как работать с порталом</h2>
 <h3>Проверить рекомендации</h3>
 <ol>
-<li>Проверьте дату среза. Если выгрузке больше {STALE_EXPORT_DAYS} дней на дату запуска, обновите данные перед заказом.</li>
+<li>Проверьте дату среза. Если выгрузке больше {STALE_EXPORT_DAYS} дней на дату запуска, <a href="#upload">обновите выгрузку ERP</a> перед заказом.</li>
 <li>В разделе <a href="#orders">«Заказ по поставщикам»</a> раскройте поставщика и сверьте количество, сроки и флаги по SKU. Позиции «Условно к закупке» требуют подтверждения байера.</li>
 <li>Проверьте <a href="#risks">риски дефицита</a>, <a href="#excess">избыток</a> и <a href="#seasons">сроки сезонных заказов</a>. Скачайте XLSX для работы со списками и проверки прогноза.</li>
 </ol>
 <h3>Прочитать подпись SKU</h3>
 <p>Под кодом SKU указаны категория, обезличенный бренд и ценовая группа внутри категории. «Цена 7/10» означает седьмой дециль. В XLSX эта подпись находится в колонке «Товар».</p>
-<h3 id="upload">Обновить выгрузку ERP</h3>
-<ol>
-<li>Подготовьте шесть свежих обезличенных файлов из ERP ({csv_files}). В <code>export_meta.json</code> укажите дату среза в поле <code>cutoff_date</code> в формате <code>ГГГГ-ММ-ДД</code>.</li>
-<li>Откройте <a href="{_REPOSITORY_URL}/tree/main/inbox">папку inbox ветки main на GitHub</a>. Выберите <strong>Add file → Upload files</strong>, добавьте все семь файлов с прежними именами и сохраните их одним коммитом в <code>main</code> через <strong>Commit changes</strong>. Для загрузки нужен доступ на запись.</li>
-<li>Проверьте, что <a href="{_REPOSITORY_URL}/actions/workflows/publish.yml">расчёт и публикация в GitHub Actions</a> завершились успешно. Затем обновите портал и сверьте дату среза.</li>
+</section>
+<section class="guide" id="upload" data-view="">
+<h2>Обновить выгрузку ERP</h2>
+<ol class="upload-steps">
+<li>
+<h3>Подготовьте шесть CSV</h3>
+<p>Возьмите свежую обезличенную выгрузку из ERP. Проверьте, что в ней есть {csv_files}.</p>
+</li>
+<li>
+<h3>Укажите, по какой день есть данные</h3>
+<p>Выберите последний день, который включён в выгрузку. Например, если данные в ней по 13 августа, укажите 13 августа, даже если выгрузили их позже.</p>
+<p>Исходный набор содержит шесть CSV. Портал создаёт отдельный файл <code>export_meta.json</code> с выбранной датой.</p>
+<div class="cutoff-picker" id="cutoff-picker" hidden="">
+<label>Дата среза<input type="date" name="cutoff_date" required="" /></label>
+<a class="download" download="export_meta.json" aria-disabled="true">Скачать export_meta.json</a>
+</div>
+<details>
+<summary>Как создать файл вручную</summary>
+<p>Сохраните в UTF-8 файл с именем <code>export_meta.json</code> и содержимым <code>{{"cutoff_date":"2026-08-13"}}</code>. Замените дату из примера на свою в формате <code>ГГГГ-ММ-ДД</code>.</p>
+<p>Если файла даты вообще нет в папке выгрузки, расчёт берёт последний день последнего полного месяца продаж. Дату среза внутри неполного месяца можно указать в файле.</p>
+</details>
+</li>
+<li>
+<h3>Загрузите файлы в GitHub</h3>
+<p>Откройте <a href="{_REPOSITORY_URL}/tree/main/inbox">папку inbox ветки main</a> и выберите <strong>Add file → Upload files</strong>. Добавьте шесть CSV и новый <code>export_meta.json</code> с прежними именами. Нажмите <strong>Commit changes</strong>, чтобы сохранить их вместе в <code>main</code>. Нужен доступ на запись.</p>
+<p>В папке уже есть файл даты от предыдущей выгрузки. Замените его вместе с CSV, иначе расчёт возьмёт старую дату.</p>
+</li>
+<li>
+<h3>Проверьте результат</h3>
+<p>Откройте <a href="{_REPOSITORY_URL}/actions/workflows/publish.yml">страницу расчётов в GitHub Actions</a>. Когда новый запуск завершится успешно, обновите портал и сверьте дату среза.</p>
+</li>
 </ol>
+<p><a href="#guide">Вернуться к инструкции по работе с порталом</a></p>
 </section>
 </div>
 </main>
