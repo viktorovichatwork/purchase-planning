@@ -44,6 +44,7 @@ class Recommendation:
     sales_qty_12m: float = 0.0
     sku_flags: tuple[str, ...] = ()
     stockout_risk: bool = False
+    annual_demand_qty: float = 0.0
 
 
 @dataclass(frozen=True)

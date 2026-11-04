@@ -11,6 +11,8 @@ LEAD_HISTORY_START = date(2025, 1, 1)
 MIN_ORDERS = 5
 DEFAULT_DELAY_DAYS = 20
 MIN_IMPORT_LEAD_DAYS = 30
+MIN_CYCLE_DAYS = 30
+MAX_CYCLE_DAYS = 120
 MAX_TRANSIT_OVERDUE_DAYS = 30
 ORDER_TAIL_SHARE = 0.10
 
@@ -94,11 +96,11 @@ def _matched_receipt_dates(
     return {line: days[0] for line, days in dates.items() if len(days) == 1 and line not in ambiguous}
 
 
-def _median_interval(dates: set[date]) -> int | None:
+def _median_interval(dates: set[date]) -> float | None:
     days = sorted(dates)
     if len(days) < 2:
         return None
-    return ceil(median((end - start).days for start, end in zip(days, days[1:])))
+    return median((end - start).days for start, end in zip(days, days[1:]))
 
 
 def _supplier_timing(
@@ -167,7 +169,10 @@ def _supplier_timing(
         cycle = _median_interval({receipt.received for receipt in receipts})
     if cycle is None:
         flags.append("Нет истории для цикла")
-    return SupplierTiming(lead_days, source, cycle, tuple(flags))
+    elif not MIN_CYCLE_DAYS <= cycle <= MAX_CYCLE_DAYS:
+        flags.append(f"цикл ограничен (было {cycle:g} дней)")
+        cycle = min(MAX_CYCLE_DAYS, max(MIN_CYCLE_DAYS, cycle))
+    return SupplierTiming(lead_days, source, ceil(cycle) if cycle is not None else None, tuple(flags))
 
 
 def read_supply(

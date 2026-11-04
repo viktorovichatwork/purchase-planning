@@ -239,7 +239,7 @@ def calculate(
             order_flags=tuple(sorted(order_flags.get(sku, set()))),
             segment=assortment.segment, is_new=assortment.is_new,
             markup_pct_12m=assortment.markup_pct_12m, sales_qty_12m=assortment.sales_qty_12m,
-            sku_flags=tuple(flags), stockout_risk=stockout_risk,
+            sku_flags=tuple(flags), stockout_risk=stockout_risk, annual_demand_qty=annual_level,
         )
         sku_plans.append((recommendation, forecast))
         if assortment.segment == Segment.PURCHASE:
