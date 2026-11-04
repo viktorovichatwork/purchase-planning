@@ -8,6 +8,7 @@ from pathlib import Path
 
 from purchase_planning.comparison import Change, summarize
 from purchase_planning.explanations import Explanations
+from purchase_planning.export import REQUIRED_COLUMNS
 from purchase_planning.facts import OrderFlag, PlanFacts, Recommendation, Segment
 from purchase_planning.order_sheet import (
     coverage_text, displayed_order_qty, excess_rows, order_date_label, rounded_quantity, stock_below_reorder_point,
@@ -17,6 +18,33 @@ from purchase_planning.parameters import STALE_EXPORT_DAYS
 from purchase_planning.replenishment import inventory_summary
 from purchase_planning.sku_labels import category_name
 from purchase_planning.wording import days_text
+
+
+_REPOSITORY_URL = "https://github.com/viktorovichatwork/purchase-planning"
+_INVENTORY_HINTS = {
+    "Покрытие 6–12 мес": "По прогнозу остатка и ожидаемых поставок хватит от 6 до 12 месяцев.",
+    "Избыток": "Остаток и товар в пути превышают порог запаса для этой позиции. "
+               "Порог учитывает прогноз, график закупок и сезон, если он есть.",
+    "Риски дефицита": "По прогнозу товар закончится раньше, чем придёт новый заказ, "
+                      "если разместить его на дату расчёта.",
+}
+_SEGMENT_HINTS = {
+    Segment.DEAD: "За последние 12 месяцев продаж не было, хотя товар был на складе.",
+    Segment.SLEEPING: "Товар продавался раньше. За последние 12 месяцев продаж и остатков не было.",
+    Segment.REVIEW: "Проверьте цену и себестоимость. Причина может быть в низкой наценке, "
+                    "неизвестной себестоимости или незавершённом пересмотре.",
+    Segment.CONDITIONAL: "Проверьте рекомендацию перед заказом. Подтверждение байера нужно, "
+                         "если мало данных, наценка чуть ниже порога или сезонный заказ запоздал.",
+    Segment.PURCHASE: "Позиция проходит отбор для закупки. Количество и дату заказа смотрите у поставщика.",
+}
+_FLAG_HINTS = {
+    OrderFlag.STUCK: "Заказ давно просрочен, существенная часть не пришла. "
+                     "Уточните у поставщика, будет ли поставка. Пока её не учитывают в пути.",
+    OrderFlag.TAIL: "Основная часть давно просроченного заказа пришла. "
+                    "Небольшой остаток не учитывают в пути. Проверьте, можно ли закрыть заказ.",
+    OrderFlag.RESCHEDULE: "По SKU есть избыток и открытый заказ. "
+                          "Согласуйте с поставщиком перенос или отмену, если это возможно.",
+}
 
 
 _WORKSPACE_SCRIPT = """
@@ -86,6 +114,27 @@ function setupList(list) {
 }
 
 for (const list of document.querySelectorAll("[data-view] > [data-browse]")) setupList(list);
+
+for (const hint of document.querySelectorAll(".hint")) {
+    const trigger = hint.querySelector("button");
+    const reset = () => delete hint.dataset.dismissed;
+    hint.addEventListener("pointerenter", () => {
+        const focused = document.querySelector(".hint:focus-within");
+        if (focused && focused !== hint) focused.dataset.dismissed = "";
+        reset();
+    });
+    trigger.addEventListener("focus", reset);
+    trigger.addEventListener("click", () => {
+        reset();
+        trigger.focus();
+    });
+}
+document.addEventListener("keydown", (event) => {
+    if (event.key !== "Escape") return;
+    for (const hint of document.querySelectorAll(".hint:hover, .hint:focus-within")) {
+        hint.dataset.dismissed = "";
+    }
+});
 
 const views = Array.from(document.querySelectorAll("[data-view]"));
 const nav = document.querySelector(".workspace-nav");
@@ -399,14 +448,29 @@ def _calendar(as_of: date, schedules: list[SupplierSchedule]) -> str:
     )
 
 
+def _hint(identifier: str, label: str, description: str) -> str:
+    return (
+        f'<span class="hint"><button type="button" aria-describedby="{identifier}">{escape(label)}</button>'
+        f'<span id="{identifier}" class="hint-text" role="tooltip">{escape(description)}</span></span>'
+    )
+
+
+def _hint_list(prefix: str, entries: Iterable[tuple[str, str]]) -> str:
+    items = "".join(
+        f"<li>{_hint(f'{prefix}-{index}', label, description)}</li>"
+        for index, (label, description) in enumerate(entries, start=1)
+    )
+    return f'<ul class="hint-list">{items}</ul>'
+
+
 def _segments(facts: PlanFacts) -> str:
     counts = Counter(row.segment for row in facts.recommendations)
-    return "<ul>" + "".join(f"<li>{segment} — {counts[segment]} SKU</li>" for segment in Segment) + "</ul>"
+    return _hint_list("segment", ((f"{segment} — {counts[segment]} SKU", _SEGMENT_HINTS[segment]) for segment in Segment))
 
 
 def _order_flags(facts: PlanFacts) -> str:
     counts = Counter(flag for row in facts.recommendations for flag in row.order_flags)
-    return "<ul>" + "".join(f"<li>{flag} — {counts[flag]} SKU</li>" for flag in OrderFlag) + "</ul>"
+    return _hint_list("flag", ((f"{flag} — {counts[flag]} SKU", _FLAG_HINTS[flag]) for flag in OrderFlag))
 
 
 def _backtest_quality(facts: PlanFacts) -> str:
@@ -417,8 +481,23 @@ def _backtest_quality(facts: PlanFacts) -> str:
     metric = next((row for row in result.metrics if row.breakdown == row.group == "Все"), None)
     if metric is None or metric.wape is None or metric.bias is None:
         return f"{warning}<p>Недостаточно данных для оценки качества прогноза.</p>"
-    overview = (f"<p>WAPE {_decimal(metric.wape * 100)}% · Смещение {_decimal(metric.bias * 100)}% · "
-                "WAPE показывает суммарную абсолютную ошибку, смещение — отклонение прогноза от факта.</p>")
+    overview = _hint_list("accuracy", (
+        (
+            f"WAPE {_decimal(metric.wape * 100)}%",
+            "Для каждого окна берём разницу между прогнозом и продажами по модулю. "
+            "Складываем ошибки, делим на сумму фактических продаж и умножаем на 100%. "
+            "Например, 38% означает 38 штук абсолютной ошибки на 100 проданных.",
+        ),
+        (
+            f"Смещение {_decimal(metric.bias * 100)}%",
+            "Складываем разницы «прогноз минус фактические продажи», делим на сумму фактических продаж "
+            "и умножаем на 100%. Например, −3,2% означает, что общий прогноз был на 3,2% ниже факта.",
+        ),
+    ))
+    context = (
+        '<p class="meta">Проверяем прогноз на прошлых периодах. Каждое окно охватывает плечо поставки '
+        'и цикл заказа поставщика. В расчёт входят только окна с полными данными и без дефицитных месяцев.</p>'
+    )
     breakdown = _table(
         "Бэктест по группам",
         ("Разрез", "Группа", "Окон", "WAPE", "Смещение", "WAPE среднего за 12 мес", "Смещение среднего за 12 мес"),
@@ -427,7 +506,7 @@ def _backtest_quality(facts: PlanFacts) -> str:
             for value in (row.wape, row.bias, row.baseline_wape, row.baseline_bias)
         )) for row in result.metrics),
     )
-    return overview + warning + f"<details><summary>По категориям и типам спроса</summary>{breakdown}</details>"
+    return context + overview + warning + f"<details><summary>По категориям и типам спроса</summary>{breakdown}</details>"
 
 
 def write_dashboard(
@@ -443,7 +522,10 @@ def write_dashboard(
         f"<p>{escape(warning)}</p>"
         for warning in (facts.cutoff_warning, facts.supply_warning) if warning
     )
-    inventory = "".join(f"<li>{name} — {count} SKU</li>" for name, count in inventory_summary(facts).items())
+    inventory = _hint_list(
+        "inventory",
+        ((f"{name} — {count} SKU", _INVENTORY_HINTS[name]) for name, count in inventory_summary(facts).items()),
+    )
     schedules = _supplier_schedules(facts)
     labels = sku_labels or {}
     overview = _decision(facts, schedules, previous_run, changes, explanations.summary if explanations else "")
@@ -456,7 +538,7 @@ def write_dashboard(
     diagnostics = (
         ("calendar", "Календарь заказов на 6 месяцев", _calendar(facts.as_of, schedules)),
         ("forecast-quality", "Качество прогноза", _backtest_quality(facts)),
-        ("stock", "Запас", f"<ul>{inventory}</ul>"),
+        ("stock", "Запас", inventory),
         ("segments", "Сегменты ассортимента", _segments(facts)),
         ("order-flags", "Флаги открытых заказов", _order_flags(facts)),
     )
@@ -468,7 +550,11 @@ def write_dashboard(
         f'<section id="{key}"><h3>{title}</h3>{body}</section>' for key, title, body in diagnostics
     )
     history_link = '<a href="history.html">История запусков</a>' if previous_run else ""
-    stale_note = "<span>Перед размещением заказа загрузите свежую выгрузку ERP.</span>" if stale else ""
+    stale_note = (
+        '<span>Перед размещением заказа загрузите свежую выгрузку ERP. '
+        '<a href="#upload">Как загрузить</a></span>' if stale else ""
+    )
+    csv_files = ", ".join(f"<code>{table}.csv</code>" for table in REQUIRED_COLUMNS)
     path.write_text(
         f"""<!doctype html>
 <html lang="ru">
@@ -516,6 +602,7 @@ p:not(.empty) {{ max-width: 75ch; }}
 .meta {{ color: var(--muted); }}
 .freshness {{ flex-basis: 100%; display: flex; flex-wrap: wrap; gap: .15rem .75rem; padding: .65rem .9rem; border-radius: .5rem; }}
 .draft {{ background: var(--draft-bg); color: var(--draft); }}
+.draft a {{ color: inherit; font-weight: 650; }}
 .current {{ color: var(--accent); background: var(--subtle); }}
 a {{ color: var(--accent); text-underline-offset: .2em; }}
 .actions {{ display: flex; align-items: center; flex-wrap: wrap; gap: .25rem 1rem; }}
@@ -563,6 +650,20 @@ input::placeholder {{ color: var(--muted); opacity: 1; }}
 button {{ padding: 0 .75rem; cursor: pointer; }}
 button:hover {{ background: var(--subtle); }}
 button[aria-disabled="true"] {{ color: var(--muted); background: var(--subtle); cursor: default; }}
+.hint-list {{ list-style: none; padding: 0; }}
+.hint {{ position: relative; display: inline-block; max-width: 100%; }}
+.hint button {{
+    padding: .35rem 0; min-height: 2rem; border: 0; background: none; text-align: left;
+    text-decoration: underline dotted; text-underline-offset: .25em;
+}}
+.hint button:hover {{ background: none; color: var(--accent); }}
+.hint-text {{
+    visibility: hidden; position: absolute; z-index: 2; inset-inline-start: 0; top: 100%;
+    width: min(26rem, calc(100vw - 4rem)); padding: .65rem .8rem; border-radius: .45rem;
+    background: var(--ink); color: var(--surface); font-size: .875rem;
+}}
+.hint:not([data-dismissed]):is(:hover, :focus-within) .hint-text {{ visibility: visible; }}
+#order-flags .hint-text {{ top: auto; bottom: 100%; }}
 .pager, .pager div {{ display: flex; align-items: center; flex-wrap: wrap; gap: .5rem; }}
 .pager {{ justify-content: space-between; margin: .75rem 0 .25rem; font-size: .875rem; }}
 :focus-visible {{ outline: 2px solid var(--accent); outline-offset: 2px; }}
@@ -610,6 +711,7 @@ ul {{ margin: 0; padding-left: 1.25rem; }}
 {content}
 <section id="diagnostics" data-view="">
 <h2>Аналитика</h2>
+<p class="meta">Наведите курсор на подчёркнутый показатель или выберите его, чтобы прочитать пояснение.</p>
 {diagnostic_html}
 </section>
 <section class="guide" id="guide" data-view="">
@@ -622,8 +724,12 @@ ul {{ margin: 0; padding-left: 1.25rem; }}
 </ol>
 <h3>Прочитать подпись SKU</h3>
 <p>Под кодом SKU указаны категория, обезличенный бренд и ценовая группа внутри категории. «Цена 7/10» означает седьмой дециль. В XLSX эта подпись находится в колонке «Товар».</p>
-<h3>Обновить выгрузку</h3>
-<p>Загрузите свежие CSV из ERP и файл с датой среза <code>export_meta.json</code> в папку <code>inbox/</code> на GitHub. После успешного расчёта и публикации откройте портал и проверьте дату среза. Предыдущие отчёты доступны в истории запусков.</p>
+<h3 id="upload">Обновить выгрузку ERP</h3>
+<ol>
+<li>Подготовьте шесть свежих обезличенных файлов из ERP ({csv_files}). В <code>export_meta.json</code> укажите дату среза в поле <code>cutoff_date</code> в формате <code>ГГГГ-ММ-ДД</code>.</li>
+<li>Откройте <a href="{_REPOSITORY_URL}/tree/main/inbox">папку inbox ветки main на GitHub</a>. Выберите <strong>Add file → Upload files</strong>, добавьте все семь файлов с прежними именами и сохраните их одним коммитом в <code>main</code> через <strong>Commit changes</strong>. Для загрузки нужен доступ на запись.</li>
+<li>Проверьте, что <a href="{_REPOSITORY_URL}/actions/workflows/publish.yml">расчёт и публикация в GitHub Actions</a> завершились успешно. Затем обновите портал и сверьте дату среза.</li>
+</ol>
 </section>
 </div>
 </main>

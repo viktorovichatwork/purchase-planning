@@ -5,8 +5,10 @@ from openpyxl import load_workbook
 
 from purchase_planning.dashboard import write_dashboard
 from purchase_planning.explanations import Explanations
+from purchase_planning.export import REQUIRED_COLUMNS
 from purchase_planning.facts import (
-    OrderFlag, PlanFacts, Recommendation, SeasonalOrder, SeasonStatus, Segment, SupplierSummary, SupplierTiming,
+    BacktestMetric, BacktestResult, OrderFlag, PlanFacts, Recommendation, SeasonalOrder, SeasonStatus, Segment,
+    SupplierSummary, SupplierTiming,
 )
 from purchase_planning.report import write_report
 from purchase_planning.sku_labels import load_sku_labels
@@ -49,6 +51,11 @@ def test_dashboard_matches_workbook_and_displays_facts(tmp_path):
     visible_text = "".join(page.itertext())
     assert page.find(".//a[@href='#guide']") is not None
     assert page.find(".//section[@id='guide']/h2").text == "Как работать с порталом"
+    assert page.find(".//header//a[@href='#upload']") is not None
+    assert page.find(".//section[@id='guide']/h3[@id='upload']") is not None
+    assert any(link.attrib["href"].endswith("/tree/main/inbox") for link in page.findall(".//section[@id='guide']//a"))
+    guide_files = {node.text for node in page.findall(".//section[@id='guide']//li/code")}
+    assert {*(f"{name}.csv" for name in REQUIRED_COLUMNS), "export_meta.json"} <= guide_files
     assert "Черновик, не размещать" not in visible_text
     for value in ("13.08.2026", "36 дней", "Устаревшая выгрузка", "Первый запуск",
                   "Зависший заказ", "Хвост заказа", "Условно к закупке"):
@@ -187,3 +194,22 @@ def test_sku_labels_on_page_and_in_workbook(tmp_path):
                     }[row[sku_index]]
     finally:
         workbook.close()
+
+
+def test_analytics_terms_have_descriptions(tmp_path):
+    day = date(2026, 8, 13)
+    backtest = BacktestResult(day, (day,), (BacktestMetric("Все", "Все", 100, .38, -.032, None, None),), {})
+    facts = PlanFacts(day, day, (), backtest=backtest)
+    dashboard = tmp_path / "index.html"
+    write_dashboard(facts, dashboard, run_date=day, previous_run=None, changes=[])
+
+    page = ElementTree.fromstring(dashboard.read_text(encoding="utf-8").split("\n", 1)[1])
+    for section, count in (("forecast-quality", 2), ("stock", 3), ("segments", 5), ("order-flags", 3)):
+        node = page.find(f".//section[@id='{section}']")
+        descriptions = {hint.attrib["id"]: hint.text for hint in node.findall(".//span[@role='tooltip']")}
+        buttons = node.findall(".//button[@aria-describedby]")
+        assert len(buttons) == len(descriptions) == count
+        for button in buttons:
+            assert descriptions[button.attrib["aria-describedby"]]
+    assert page.find(".//span[@id='accuracy-1']/../button").text == "WAPE 38,0%"
+    assert page.find(".//span[@id='accuracy-2']/../button").text == "Смещение -3,2%"
