@@ -3,6 +3,7 @@ import json
 import shutil
 import subprocess
 import sys
+from calendar import monthrange
 from datetime import date, timedelta
 from pathlib import Path
 
@@ -205,7 +206,7 @@ def test_export_to_order_sheet(export):
     assert len(facts.recommendations) == 1
     row = facts.recommendations[0]
     assert (row.supplier_id, row.sku_id) == ("SUP-1", "SKU-1")
-    assert row.order_qty == pytest.approx(20 * (18 / 31 + 7 + 1 / 30))
+    assert row.order_qty == pytest.approx(20 * (29 / 31 + 1 / 30))
 
     path = export / "order.xlsx"
     write_report(facts, path, run_date=date(2026, 8, 14))
@@ -214,8 +215,8 @@ def test_export_to_order_sheet(export):
         header, values, total = list(workbook["Заказ по поставщикам"].values)[-3:]
         assert header[3:6] == ("Исключено дефицитных месяцев", "Прогноз на горизонт, шт.", "Мало данных")
         assert values[:2] == (row.supplier_id, row.sku_id)
-        assert values[2:5] == (160, 0, round(sum(row.monthly_forecast)))
-        assert values[header.index("Целевой запас")] == pytest.approx(152.2795699)
+        assert values[2:5] == (20, 0, round(sum(row.monthly_forecast)))
+        assert values[header.index("Целевой запас")] == pytest.approx(19.3763441)
         assert values[header.index("Страховой запас")] == 0
         assert values[header.index("Тип спроса")] == "Регулярный"
         assert values[6:9] == (201, "Вся история заказов + 20 дней", 30)
@@ -226,10 +227,49 @@ def test_export_to_order_sheet(export):
         assert forecast_header[2:] == tuple(f"Прогноз {month:%Y-%m}" for month in facts.forecast_months)
         assert forecast_row[2:] == tuple(round(qty) for qty in row.monthly_forecast)
         assert total[:2] == ("SUP-1", "Итого")
-        assert total[2] == 160
+        assert total[2] == 20
         assert total[header.index("Пора заказывать у поставщика")] == "Да"
     finally:
         workbook.close()
+
+
+def test_order_covers_cycle_and_safety_stock_at_arrival(export):
+    (export / "export_meta.json").write_text('{"cutoff_date":"2026-01-01"}', encoding="utf-8")
+    sales = export / "sales_monthly.csv"
+    header = sales.read_text(encoding="utf-8").splitlines()[0]
+    # One unit per day gives an exact 30 units per 30-day month.
+    sales.write_text(
+        header + "\n" + "".join(
+            f"SKU-1,tools,2025-{month:02},{monthrange(2025, month)[1]},0,1,30,0\n"
+            for month in range(1, 13)
+        ),
+        encoding="utf-8",
+    )
+    orders = export / "purchase_orders.csv"
+    header = orders.read_text(encoding="utf-8").splitlines()[0]
+    orders.write_text(
+        header + "\n"
+        "PO-1,SKU-1,SUP-1,import,2025-01-01,,100,completed,100,100,100,0\n"
+        "PO-2,SKU-1,SUP-1,import,2025-03-02,,100,completed,100,100,100,0\n",
+        encoding="utf-8",
+    )
+    (export / "backtest.json").write_text(json.dumps({
+        "cutoff": "2026-01-01",
+        "origins": [],
+        "metrics": [],
+        "quantiles": {"Регулярный": {"windows": 1, "p75": 1.5, "p85": 1.5, "p95": 1.5}},
+    }), encoding="utf-8")
+
+    facts = plan(export, date(2026, 1, 1))
+    timing = facts.suppliers[0].timing
+    row = facts.recommendations[0]
+    assert (timing.lead_days, timing.cycle_days) == (120, 60)
+    assert row.stock_at_calculation == row.stock_at_arrival == 0
+    assert sum(row.monthly_forecast) == pytest.approx(180)
+    assert row.safety_stock == pytest.approx(90)
+    assert row.target_stock == pytest.approx(150)
+    assert row.order_qty == pytest.approx(150)
+    assert facts.suppliers[0].order_qty == 200
 
 
 def test_saved_backtest_excludes_stockouts_and_calibrates_the_order(export):
@@ -276,7 +316,7 @@ def test_missing_metadata_uses_last_complete_month_and_warns_in_report(export):
     (export / "export_meta.json").unlink()
     facts = plan(export)
     assert facts.as_of == facts.cutoff == date(2026, 7, 31)
-    assert facts.recommendations[0].order_qty == pytest.approx(20 * (7 + 19 / 31))
+    assert facts.recommendations[0].order_qty == pytest.approx(20 * (11 / 28 + 19 / 31))
 
     path = export / "order.xlsx"
     write_report(facts, path)
@@ -401,7 +441,7 @@ def test_monthly_forecast_uses_category_weights(export, history, september_forec
     september = facts.forecast_months.index(date(2026, 9, 1))
     assert row.monthly_forecast[september] == pytest.approx(september_forecast)
     assert sum(row.monthly_forecast) == pytest.approx(september_forecast)
-    assert row.order_qty == pytest.approx(september_forecast)
+    assert row.order_qty == 0
     assert row.low_data is low_data
 
 
@@ -542,7 +582,7 @@ def test_segment_uses_markup_priority_and_hysteresis(export, markup, prior_marku
     )
     orders = export / "purchase_orders.csv"
     orders.write_text(
-        orders.read_text(encoding="utf-8").replace(",181,completed", ",400,completed"), encoding="utf-8",
+        orders.read_text(encoding="utf-8").replace(",181,completed", ",280,completed"), encoding="utf-8",
     )
     stock = export / "stock_monthly.csv"
     stock.write_text(stock.read_text(encoding="utf-8").replace("2026-08,25", "2026-08,0"), encoding="utf-8")

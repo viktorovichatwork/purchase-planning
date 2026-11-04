@@ -246,9 +246,10 @@ def calculate(
             horizon_end = forecast_start + timedelta(days=horizon_days if horizon_days is not None else lead)
             forecast = dict(forecast_period(profile, annual_level, forecast_start, horizon_end))
             # Both the cutoff and the expected arrival are measured at the end of the day.
+            cycle_start = arrival + timedelta(days=1)
             projection = project_stock(
                 current_stock, arrivals, profile, annual_level,
-                start=forecast_start, end=horizon_end, snapshot_at=arrival + timedelta(days=1),
+                start=forecast_start, end=horizon_end, snapshot_at=cycle_start,
             )
             arrival_stock = projection.stock_at_snapshot
             stockout_risk = (
@@ -259,8 +260,9 @@ def calculate(
             if horizon_days is not None:
                 forecast_total = fsum(forecast.values())
                 multiplier = stock_multiplier(backtest, demand.demand_type, profile.is_seasonal)
-                target_stock = forecast_total * multiplier
-                safety_stock = target_stock - forecast_total
+                safety_stock = (multiplier - 1) * forecast_total
+                cycle_forecast = fsum(qty for _, qty in forecast_period(profile, annual_level, cycle_start, horizon_end))
+                target_stock = cycle_forecast + safety_stock
                 if not unknown_supplier and purchase_segment:
                     order_qty = max(0.0, target_stock - arrival_stock)
         recommendation = Recommendation(
