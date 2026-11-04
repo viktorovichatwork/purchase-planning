@@ -14,7 +14,6 @@ DEFAULT_DELAY_DAYS = 20
 MIN_IMPORT_LEAD_DAYS = 30
 MIN_CYCLE_DAYS = 30
 MAX_CYCLE_DAYS = 120
-MAX_TRANSIT_OVERDUE_DAYS = 30
 ORDER_TAIL_SHARE = 0.10
 ORDER_MULTIPLES = (100, 50, 10)
 
@@ -237,12 +236,12 @@ def classify_transit(
             flags[line.sku].add(OrderFlag.UNCONFIRMED)
         if line.promised is None or line.promised < line.placed:
             flags[line.sku].add("Нет корректной даты прихода")
-        elif (as_of - line.promised).days <= MAX_TRANSIT_OVERDUE_DAYS:
+        elif line.promised >= as_of:
+            # In transit means the planned arrival has not passed yet. A passed date is shown to the buyer
+            # as a late order and is not counted: the plan does not guess whether it will still come.
+            # An order due on the data date has not been received yet, so it is expected the next day.
             if line.pending > 0:
-                expected = max(line.promised, as_of + timedelta(days=1))
-                arrivals[line.sku][expected] += line.pending
-                if line.promised < as_of:
-                    flags[line.sku].add("Дата прихода просроченного заказа оценена")
+                arrivals[line.sku][max(line.promised, as_of + timedelta(days=1))] += line.pending
         elif line.ordered <= 0:
             flags[line.sku].add("Нет количества заказа для проверки недопоставки")
         elif line.received < line.ordered:

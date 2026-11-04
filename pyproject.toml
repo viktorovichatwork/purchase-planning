@@ -13,3 +13,6 @@ test = ["pytest>=8,<10"]
 
 [tool.setuptools.packages.find]
 include = ["purchase_planning*"]
+
+[tool.setuptools.package-data]
+purchase_planning = ["methodology.md"]

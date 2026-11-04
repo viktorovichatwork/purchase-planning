@@ -3,8 +3,8 @@ from datetime import date
 from enum import StrEnum
 
 
-ESTIMATED_CUTOFF_SOURCE = "оценка по продажам неполного месяца"
-UNCONFIRMED_ORDERS_LABEL = "Не подтверждены поставщиком, строк заказов"
+ESTIMATED_CUTOFF_SOURCE = "в выгрузке нет даты, день определён по объёму продаж последнего месяца"
+UNCONFIRMED_ORDERS_LABEL = "Подтверждение в ERP не заполнено, строк заказов"
 
 
 class Segment(StrEnum):
@@ -15,10 +15,15 @@ class Segment(StrEnum):
     PURCHASE = "К закупке"
 
 
+NO_SUPPLIER_FLAG = "Поставщик не указан"
+TYPICAL_TIMING_FLAG = "Срок поставки неизвестен: расчёт по типичному сроку"
+TYPICAL_TIMING_SOURCE = "Типичный срок по всем поставщикам"
+
+
 class OrderFlag(StrEnum):
-    STUCK = "Зависший заказ"
+    STUCK = "Опаздывает"
     TAIL = "Хвост заказа"
-    UNCONFIRMED = "Не подтверждён поставщиком"
+    UNCONFIRMED = "Подтверждение в ERP не заполнено"
     RESCHEDULE = "Перенести/отменить открытый заказ"
 
 
@@ -107,11 +112,17 @@ class Recommendation:
     order_qty: float
     excluded_stockout_months: int = 0
     monthly_forecast: tuple[float, ...] = ()
+    # Months without stock among the months the SKU normally sells (season months for seasonal categories).
+    missing_stock_months: int = 0
+    checked_stock_months: int = 0
+    seasonal_category: bool = False
     low_data: bool = False
     stock_at_calculation: float = 0.0
     arrival_date: date | None = None
     stock_at_arrival: float | None = None
     in_transit_by_month: tuple[tuple[date, float], ...] = ()
+    # Open supplier orders with an outstanding quantity: planned arrival date (None if missing) and quantity.
+    open_orders: tuple[tuple[date | None, float], ...] = ()
     order_flags: tuple[str, ...] = ()
     segment: Segment = Segment.PURCHASE
     is_new: bool = False
@@ -179,6 +190,7 @@ class PlanFacts:
     backtest: BacktestResult | None = None
     backtest_warning: str | None = None
     unconfirmed_order_lines: int = 0
+    typical_timing: SupplierTiming | None = None
 
     @property
     def cutoff_is_estimated(self) -> bool:

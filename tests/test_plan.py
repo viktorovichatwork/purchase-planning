@@ -14,7 +14,9 @@ from openpyxl import load_workbook
 from purchase_planning import ExportValidationError, plan, write_report
 from purchase_planning.backtest import run_backtest
 from purchase_planning.dashboard import write_dashboard
-from purchase_planning.facts import OrderFlag, Segment
+from purchase_planning.actions import Action, action
+from purchase_planning.facts import ESTIMATED_CUTOFF_SOURCE, TYPICAL_TIMING_FLAG, OrderFlag, Segment
+from purchase_planning.order_sheet import open_orders_text
 from purchase_planning.planner import calculate
 from purchase_planning.runs import run_plan
 
@@ -172,7 +174,7 @@ def test_short_import_lead_is_flagged_in_source_column(export, supply_type, plan
         workbook.close()
 
 
-def test_open_orders_respect_arrival_and_overdue_boundaries(export):
+def test_only_open_orders_with_planned_arrival_ahead_are_in_transit(export):
     with (export / "purchase_orders.csv").open("a", encoding="utf-8") as source:
         source.write(
             "PO-2,SKU-1,SUP-1,import,2026-01-01,2026-07-14,194,open,20,20,15,5\n"
@@ -184,11 +186,13 @@ def test_open_orders_respect_arrival_and_overdue_boundaries(export):
 
     facts = plan(export)
     row = facts.recommendations[0]
-    assert row.in_transit_by_month == ((date(2026, 8, 1), 5), (date(2026, 10, 1), 1000))
-    assert set(row.order_flags) == {
-        "Хвост заказа", "Зависший заказ", "Дата прихода просроченного заказа оценена",
-        "Перенести/отменить открытый заказ",
-    }
+    # Planned arrival dates that have passed are not counted, however recent: the buyer sees the delay.
+    assert row.in_transit_by_month == ((date(2026, 10, 1), 1000),)
+    assert {"Хвост заказа", "Опаздывает"} <= set(row.order_flags)
+    assert open_orders_text(row, facts.as_of) == (
+        "10 шт. — опаздывает на 31 день, в расчёт не взято; 11 шт. — опаздывает на 31 день, в расчёт не взято; "
+        "5 шт. — опаздывает на 30 дней, в расчёт не взято; 1000 шт. — придёт 01.10.2026, через 49 дней"
+    )
     assert row.order_qty == 0
     assert row.arrival_date == date(2027, 3, 15)
     assert row.stock_at_arrival == pytest.approx(1000 - 20 * (5 + 15 / 31))
@@ -393,7 +397,7 @@ def test_missing_metadata_uses_last_complete_month_and_reports_source(export):
     workbook = load_workbook(path)
     try:
         parameters = dict(workbook["Параметры"].values)
-        assert parameters["Как определена дата среза"] == "по последнему полному месяцу продаж 31.07.2026"
+        assert parameters["Как определена дата данных"] == "по последнему полному месяцу продаж 31.07.2026"
     finally:
         workbook.close()
 
@@ -481,21 +485,24 @@ def test_full_inbox_cutoff_and_open_orders_with_future_arrivals(tmp_path):
     assert len(future) == 22
     assert sum(line.pending for line in future) == 17_127
     assert facts.unconfirmed_order_lines == 54
-    assert sum(row.in_transit for row in facts.recommendations) == 17_637  # Includes 510 overdue units.
+    # The dataset README: 22 open lines with a future arrival date, 17 127 units in transit.
+    assert sum(row.in_transit for row in facts.recommendations) == 17_127
 
     dashboard = tmp_path / "index.html"
     write_dashboard(facts, dashboard, run_date=date(2026, 11, 4), previous_run=None, changes=[])
     page = dashboard.read_text(encoding="utf-8")
-    assert '≈ <time datetime="2026-08-13">13.08.2026</time> · оценка по продажам неполного месяца' in page
-    assert "<dt>Не подтверждены поставщиком, строк заказов</dt><dd>54</dd>" in page
+    assert 'Остатки и продажи из ERP на <time datetime="2026-08-13">13.08.2026</time>' in page
+    # The ERP rarely fills the confirmed quantity, so the count is not a headline metric.
+    assert "строк заказов</dt>" not in page
 
     path = tmp_path / "report.xlsx"
     write_report(facts, path, run_date=date(2026, 11, 4))
     workbook = load_workbook(path, read_only=True)
     try:
         parameters = dict(workbook["Параметры"].values)
-        assert parameters["Дата среза"] == "≈ 13.08.2026 · оценка по продажам неполного месяца"
-        assert dict(workbook["Сводка"].values)["Не подтверждены поставщиком, строк заказов"] == 54
+        assert parameters["Данные ERP на"] == "13.08.2026"
+        assert parameters["Как определена дата данных"] == ESTIMATED_CUTOFF_SOURCE
+        assert dict(workbook["Сводка"].values)["Подтверждение в ERP не заполнено, строк заказов"] == 54
     finally:
         workbook.close()
 
@@ -519,7 +526,7 @@ def test_explicit_as_of_uses_only_data_available_on_that_date(export):
     assert facts.supply_warning
 
 
-def test_demand_level_uses_complete_months_with_stock_or_sales_from_2024(export):
+def test_demand_level_uses_complete_months_with_stock_or_sales_of_the_last_year(export):
     with (export / "sales_monthly.csv").open("a", encoding="utf-8") as source:
         for month in range(1, 13):
             source.write(f"SKU-1,tools,2023-{month:02},900,0,1,30,0\n")
@@ -530,7 +537,8 @@ def test_demand_level_uses_complete_months_with_stock_or_sales_from_2024(export)
 
     # May had stock and no sales. June had sales and no opening stock.
     assert row.monthly_forecast[1] == pytest.approx(40 / 3)
-    assert row.excluded_stockout_months == 28
+    # Only the last 12 complete months count: August 2025 to July 2026.
+    assert row.excluded_stockout_months == 9
 
 
 def test_net_sales_drive_demand_but_gross_sales_keep_month_and_segment(export):
@@ -550,8 +558,12 @@ def test_net_sales_drive_demand_but_gross_sales_keep_month_and_segment(export):
     row = facts.recommendations[0]
     profile = facts.category_profiles[0]
     assert profile.weights[5:7] == pytest.approx((0.25, 0.75))
-    assert row.annual_demand_qty == pytest.approx(30)
+    # June 2025 and July 2025 are outside the 12-month window. June 2026 nets to zero.
+    assert row.annual_demand_qty == pytest.approx(20)
     assert row.excluded_stockout_months == 10
+    # The category sells only in June and July. Empty shelves off season are not a stockout to check,
+    # and both season months had stock or sales.
+    assert (row.missing_stock_months, row.checked_stock_months) == (0, 2)
     assert row.segment == Segment.PURCHASE
     assert row.sales_qty_12m == 920
     assert row.markup_pct_12m == 30
@@ -679,7 +691,9 @@ def test_analog_forecast_uses_category_and_price_decile_and_respects_own_level(
     )
     assert rows["SKU-4"].low_data is low_data
     assert not rows["SKU-2"].low_data
-    assert rows["SKU-4"].segment == (Segment.DEAD if months_with_stock else Segment.CONDITIONAL)
+    # A sale in the incomplete month counts for the markup, as in the ERP: 30% is known, so the SKU is ordered.
+    expected = Segment.DEAD if months_with_stock else Segment.PURCHASE if partial_sale else Segment.CONDITIONAL
+    assert rows["SKU-4"].segment == expected
     assert rows["SKU-4"].is_new is partial_sale
 
 
@@ -734,35 +748,34 @@ def test_sleeping_sku_is_reported_without_an_order(export):
     row, = facts.recommendations
     assert row.segment == "Спящие"
     assert row.order_qty == 0
-    assert row.excluded_stockout_months == 24
+    assert row.excluded_stockout_months == 12
     assert not facts.suppliers[0].time_to_order
 
     path = export / "order.xlsx"
     write_report(facts, path)
     with path.open("rb") as report:
         workbook = load_workbook(report)
-        header, sleeping = workbook["Спящие"].values
-        assert sleeping[:2] == ("SUP-1", "SKU-1")
+        header, sleeping = workbook["Не заказывать"].values
+        assert sleeping[:4] == (
+            "Год без продаж и без остатка", "Решить, возвращать ли товар в ассортимент", "SUP-1", "SKU-1",
+        )
         assert sleeping[header.index("К заказу")] == 0
         assert all("SKU-1" not in values for values in workbook["Заказ по поставщикам"].values)
         workbook.close()
 
 
 @pytest.mark.parametrize(
-    ("markup", "prior_markup", "previous", "segment", "can_order"),
+    ("markup", "prior_markup", "segment", "can_order"),
     [
-        ("19.99", "35", None, "На пересмотр", False),
-        ("20", "35", None, "Условно к закупке", True),
-        ("24.99", "35", None, "Условно к закупке", True),
-        ("25", "35", None, "К закупке", True),
-        ("27", "19", None, "На пересмотр", False),
-        ("27", "19", "К закупке", "К закупке", True),
-        ("29", "35", "На пересмотр", "На пересмотр", False),
-        ("30", "24", "На пересмотр", "К закупке", True),
-        ("", "35", None, "На пересмотр", False),
+        ("19.99", "35", "На пересмотр", False),
+        ("24.99", "35", "На пересмотр", False),
+        ("25", "35", "К закупке", True),
+        # Only the last 12 months count: a low markup a year ago does not hold the SKU back.
+        ("27", "19", "К закупке", True),
+        ("", "35", "На пересмотр", False),
     ],
 )
-def test_segment_uses_markup_priority_and_hysteresis(export, markup, prior_markup, previous, segment, can_order):
+def test_segment_uses_the_single_markup_threshold(export, markup, prior_markup, segment, can_order):
     sales = export / "sales_monthly.csv"
     header = sales.read_text(encoding="utf-8").splitlines()[0]
     sales.write_text(
@@ -777,9 +790,12 @@ def test_segment_uses_markup_priority_and_hysteresis(export, markup, prior_marku
     )
     stock = export / "stock_monthly.csv"
     stock.write_text(stock.read_text(encoding="utf-8").replace("2026-08,25", "2026-08,0"), encoding="utf-8")
+    with stock.open("a", encoding="utf-8") as source:
+        # In stock without sales: not a long stockout that would need the buyer anyway.
+        for month in ("2025-08", "2025-09", "2025-10", "2025-11", "2025-12", *(f"2026-{m:02}" for m in range(1, 7))):
+            source.write(f"SKU-1,{month},5\n")
 
-    previous_segments = None if previous is None else {"SKU-1": Segment(previous)}
-    row, = plan(export, previous_segments=previous_segments).recommendations
+    row, = plan(export).recommendations
     assert row.segment == segment
     assert (row.order_qty > 0) == can_order
     assert "Возвраты > 10%" in row.sku_flags
@@ -818,30 +834,38 @@ def test_pilot_export_lists_orders_and_flags_missing_supplier_timing(tmp_path):
     assert rows.keys() == catalog.keys()
     unknown = [row for row in rows.values() if catalog[row.sku_id]["supply_type"] == "unknown"]
     assert len(unknown) == 153
-    assert all(row.order_qty == 0 and "Поставщик не указан" in row.sku_flags for row in unknown)
+    assert all("Поставщик не указан" in row.sku_flags for row in unknown)
+    # Selling SKUs without a known supplier go to the buyer with an order sized on a typical supplier.
+    typical = [row for row in unknown if any(flag.startswith(TYPICAL_TIMING_FLAG) for flag in row.sku_flags)]
+    assert typical and all(row.segment == Segment.CONDITIONAL and row.sales_qty_12m > 0 for row in typical)
+    assert all(row.order_qty == 0 for row in unknown if row not in typical)
+    # Without a supplier nobody can place the order, so it never counts as a supplier to order now.
+    assert not any(summary.time_to_order for summary in facts.suppliers if not summary.supplier_id)
+    # Seasonal SKUs are checked only against their season months.
+    seasonal_checked = [row for row in rows.values() if row.seasonal_category and row.checked_stock_months]
+    assert seasonal_checked and all(row.checked_stock_months <= 6 for row in seasonal_checked)
     missing_lead = {summary.supplier_id for summary in facts.suppliers if summary.timing.lead_days is None}
     assert missing_lead
     assert all(
         row.order_qty == 0 and "Не определено плечо поставки" in row.sku_flags
-        for row in rows.values() if row.supplier_id in missing_lead
+        for row in rows.values()
+        if row.supplier_id in missing_lead and not any(flag.startswith(TYPICAL_TIMING_FLAG) for flag in row.sku_flags)
     )
 
     path = tmp_path / "order.xlsx"
     write_report(facts, path)
     workbook = load_workbook(path, read_only=True)
     try:
-        for segment in Segment:
-            name = "Заказ по поставщикам" if segment == Segment.PURCHASE else segment
-            header = next(row for row in workbook[name].values if row[1] == "SKU")
-            data = [row for row in workbook[name].values if row[1] in catalog]
-            assert sorted(row[1] for row in data) == sorted(
-                row.sku_id for row in rows.values()
-                if (row.order_qty > 0 if segment == Segment.PURCHASE else row.segment == segment)
+        orders = [row for row in workbook["Заказ по поставщикам"].values if row[1] in catalog]
+        assert sorted(row[1] for row in orders) == sorted(row.sku_id for row in rows.values() if row.order_qty > 0)
+        for group in (Action.DECIDE, Action.SKIP):
+            header = next(row for row in workbook[group].values if row[3] == "SKU")
+            data = [row for row in workbook[group].values if row[3] in catalog]
+            assert sorted(row[3] for row in data) == sorted(
+                row.sku_id for row in rows.values() if action(row) == group
             )
-            if segment == Segment.REVIEW:
-                sales = [row[header.index("Продажи за 12 мес, шт.")] for row in data]
-                assert sales == sorted(sales, reverse=True)
-            if segment in {Segment.DEAD, Segment.SLEEPING, Segment.REVIEW}:
+            assert all(row[0] and row[1] for row in data)
+            if group == Action.SKIP:
                 assert all(row[header.index("К заказу")] == 0 for row in data)
     finally:
         workbook.close()
@@ -882,7 +906,7 @@ def test_first_stockout_before_in_transit_receipt(export):
     with_workbook = load_workbook(path, read_only=True)
     try:
         _, risk = list(with_workbook["Риски дефицита"].values)
-        assert risk[:6] == ("SKU-1", None, "SUP-1", 60, 100, "2026-03-31")
+        assert risk[:7] == ("SKU-1", None, "SUP-1", 60, 100, "100 шт. — придёт 01.05.2026, через 90 дней", "2026-03-31")
         headers, forecast = list(with_workbook["Прогноз"].values)
         assert forecast[headers.index("Покрытие, мес")] == 2
     finally:
@@ -1133,7 +1157,7 @@ def test_run_history_compares_the_same_export_and_preserves_parameters(export, t
             values = dict(list(workbook["Параметры"].values)[1:])
             assert values["Порог устаревания, дней"] == parameters["Порог устаревания, дней"] == 35
             assert values["LLM_MAX_SKUS"] == parameters["LLM_MAX_SKUS"] == 1
-            assert values["Выход из пересмотра, %"] == 30
+            assert values["К закупке при наценке от, %"] == 25
         finally:
             workbook.close()
 
@@ -1160,7 +1184,8 @@ def test_run_comparison_uses_saved_segment_and_observed_drivers(export, tmp_path
         source.write("SKU-1,2026-08-10,10,SUP-1,import\n")
     second = run_plan(export, history)
     facts = json.loads((second / "facts.json").read_text(encoding="utf-8"))
-    assert facts["recommendations"][0]["segment"] == Segment.REVIEW
+    # 27% is above the 25% threshold: the SKU returns to purchase at once, without a waiting band.
+    assert facts["recommendations"][0]["segment"] == Segment.PURCHASE
 
     sales.write_text(sales.read_text(encoding="utf-8").replace(",27,0\n", ",30,0\n"), encoding="utf-8")
     # Compare against the first run to exercise the same observed inputs in one change.
@@ -1184,18 +1209,31 @@ def test_parameter_change_explains_new_risk_and_recovery(export, tmp_path, monke
     history = tmp_path / "runs"
     run_plan(export, history)
 
-    monkeypatch.setattr(segments, "RECOVERY_MARKUP_PCT", 35)
-    monkeypatch.setattr(segments, "REVIEW_MARKUP_PCT", 31)
+    monkeypatch.setattr(segments, "PURCHASE_MARKUP_PCT", 31)
     second = run_plan(export, history)
     change, = json.loads((second / "diff.json").read_text(encoding="utf-8"))["changes"]
     assert change["segment"] == [Segment.PURCHASE, Segment.REVIEW]
     assert change["stockout_risk"] == [True, False]
     assert change["drivers"] == ["parameter_changed"]
 
-    monkeypatch.setattr(segments, "REVIEW_MARKUP_PCT", 20)
-    monkeypatch.setattr(segments, "RECOVERY_MARKUP_PCT", 30)
+    monkeypatch.setattr(segments, "PURCHASE_MARKUP_PCT", 25)
     third = run_plan(export, history)
     change, = json.loads((third / "diff.json").read_text(encoding="utf-8"))["changes"]
     assert change["segment"] == [Segment.REVIEW, Segment.PURCHASE]
     assert change["stockout_risk"] == [False, True]
     assert change["drivers"] == ["parameter_changed"]
+
+
+def test_change_count_follows_action_groups():
+    from purchase_planning.comparison import count_changes
+
+    def change(old, new):
+        return {"sku_id": "SKU-1", "order_qty": (0.0, 0.0), "segment": (old, new), "stockout_risk": (False, False),
+                "drivers": [], "flags": []}
+
+    counts = count_changes([
+        change("Мёртвые", "Спящие"),  # both «Не заказывать»
+        change("К закупке", "Условно к закупке"),
+        change(None, "К закупке"),
+    ])
+    assert counts.segments == 2

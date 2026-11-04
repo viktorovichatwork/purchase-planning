@@ -3,6 +3,7 @@ from itertools import groupby
 from math import ceil, isclose
 
 from purchase_planning.facts import PlanFacts, Recommendation
+from purchase_planning.wording import days_text
 
 SupplierOrder = tuple[str, list[Recommendation], int]
 
@@ -35,6 +36,22 @@ def stock_below_reorder_point(row: Recommendation) -> bool:
     return row.stock_at_calculation <= 0 or (
         row.stock_until is not None and row.arrival_date is not None and row.stock_until < row.arrival_date
     )
+
+
+def open_orders_text(row: Recommendation, as_of: date) -> str:
+    """Open supplier orders in plain words: when each one arrives or how late it is."""
+    parts = []
+    for promised, quantity in row.open_orders:
+        amount = f"{quantity:.0f} шт."
+        if promised is None:
+            parts.append(f"{amount} — в ERP нет верной даты прихода, в расчёт не взято")
+        elif promised == as_of:
+            parts.append(f"{amount} — придёт {promised:%d.%m.%Y}, в день выгрузки")
+        elif promised > as_of:
+            parts.append(f"{amount} — придёт {promised:%d.%m.%Y}, через {days_text((promised - as_of).days)}")
+        else:
+            parts.append(f"{amount} — опаздывает на {days_text((as_of - promised).days)}, в расчёт не взято")
+    return "; ".join(parts) or "—"
 
 
 def coverage_text(row: Recommendation) -> str:
