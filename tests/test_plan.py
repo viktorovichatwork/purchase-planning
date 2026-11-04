@@ -74,6 +74,23 @@ def test_missing_metadata_uses_last_complete_month_and_warns_in_report(export):
         workbook.close()
 
 
+def test_partially_marked_month_is_excluded_from_fallback(export):
+    (export / "export_meta.json").unlink()
+    with (export / "sales_monthly.csv").open("a", encoding="utf-8") as source:
+        source.write("SKU-1,tools,2026-08,20,0,1,30,0\n")
+
+    assert plan(export).cutoff == date(2026, 7, 31)
+
+
+def test_csv_with_only_blank_fields_is_rejected(export):
+    table = export / "supplier_dim.csv"
+    header = table.read_text(encoding="utf-8").splitlines()[0]
+    table.write_text(f"{header}\n,,,,,\n", encoding="utf-8")
+
+    with pytest.raises(ExportValidationError, match="supplier_dim.csv: нет строк данных"):
+        plan(export)
+
+
 def test_explicit_as_of_uses_only_data_available_on_that_date(export):
     facts = plan(export, as_of=date(2026, 7, 15))
     assert facts.cutoff == date(2026, 8, 13)

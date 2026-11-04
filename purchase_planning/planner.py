@@ -56,6 +56,7 @@ def plan(data_dir: str | Path, as_of: date | None = None) -> PlanFacts:
     tables = read_export(directory)
     reasons: list[str] = []
     complete_sales: list[tuple[str, date, float]] = []
+    partial_months: set[date] = set()
     for row in tables["sales_monthly"]:
         try:
             month_end = _month_end(row["month"])
@@ -70,6 +71,8 @@ def plan(data_dir: str | Path, as_of: date | None = None) -> PlanFacts:
             continue
         if row["partial_month"] == "0":
             complete_sales.append((row["sku_id"], month_end, quantity))
+        else:
+            partial_months.add(month_end)
 
     stock: dict[tuple[str, date], float] = {}
     for row in tables["stock_monthly"]:
@@ -82,6 +85,7 @@ def plan(data_dir: str | Path, as_of: date | None = None) -> PlanFacts:
     if reasons:
         raise ExportValidationError(reasons)
 
+    complete_sales = [sale for sale in complete_sales if sale[1] not in partial_months]
     cutoff, warning = _read_cutoff(directory / "export_meta.json", [month for _, month, _ in complete_sales])
     calculation_date = cutoff if as_of is None else as_of
     if calculation_date > cutoff:

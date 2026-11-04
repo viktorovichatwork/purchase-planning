@@ -53,7 +53,7 @@ def read_export(data_dir: Path) -> dict[str, list[dict[str, str]]]:
 
                 rows = []
                 for values in reader:
-                    if not values:
+                    if not any(value.strip() for value in values):
                         continue
                     if len(values) != len(header):
                         reasons.append(
