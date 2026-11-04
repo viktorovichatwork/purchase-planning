@@ -9,10 +9,13 @@ from purchase_planning.facts import Segment
 REVIEW_MARKUP_PCT = 20
 PURCHASE_MARKUP_PCT = 25
 RECOVERY_MARKUP_PCT = 30
+ASSORTMENT_MONTHS = 12
+RETURN_FLAG_SHARE = 0.10
+MISSING_COST_SHARE = 0.50
 
 
 class ReviewReason(StrEnum):
-    MISSING_COST = "Себестоимость неизвестна более чем для 50% проданных штук"
+    MISSING_COST = f"Себестоимость неизвестна более чем для {MISSING_COST_SHARE:.0%} проданных штук"
     LOW_MARKUP = "Наценка ниже 20%"
     HYSTERESIS = "Гистерезис: наценка ниже 30%"
 
@@ -56,7 +59,7 @@ def _markup_state(
     markup = None
     start = month_index(next_sale.month) if next_sale else last_complete_month
     for month in range(start, last_complete_month + 1):
-        while window and month_index(window[0].month) <= month - 12:
+        while window and month_index(window[0].month) <= month - ASSORTMENT_MONTHS:
             window.popleft()
         while next_sale is not None and month_index(next_sale.month) == month:
             window.append(next_sale)
@@ -70,7 +73,7 @@ def _markup_state(
         was_on_review = reason is not None
         if month == last_complete_month and previous_segment is not None:
             was_on_review = previous_segment == Segment.REVIEW
-        if missing_units > priced_units:
+        if missing_units * (1 - MISSING_COST_SHARE) > priced_units * MISSING_COST_SHARE:
             reason = ReviewReason.MISSING_COST
         elif markup is not None and markup < REVIEW_MARKUP_PCT:
             reason = ReviewReason.LOW_MARKUP
@@ -86,7 +89,7 @@ def classify_sku(
     had_recent_stock: bool, low_data: bool, previous_segment: Segment | None,
 ) -> Assortment:
     current_month = month_index(as_of)
-    recent_sales = [sale for sale in sales if month_index(sale.month) > current_month - 12]
+    recent_sales = [sale for sale in sales if month_index(sale.month) > current_month - ASSORTMENT_MONTHS]
     sold = fsum(sale.quantity for sale in recent_sales)
     returned = fsum(sale.returns for sale in recent_sales)
     markup, missing_units, review_reason = _markup_state(sales, last_complete_month, previous_segment)
@@ -96,8 +99,8 @@ def classify_sku(
     insufficient_markup = sold > 0 and markup is None and review_reason is None
     if insufficient_markup:
         flags.append("Мало данных о наценке")
-    if sold > 0 and returned > sold * 0.10:
-        flags.append("Возвраты > 10%")
+    if sold > 0 and returned > sold * RETURN_FLAG_SHARE:
+        flags.append(f"Возвраты > {RETURN_FLAG_SHARE:.0%}")
 
     if sold <= 0 and had_recent_stock:
         segment = Segment.DEAD
@@ -110,5 +113,5 @@ def classify_sku(
         segment = Segment.CONDITIONAL
     else:
         segment = Segment.PURCHASE
-    is_new = first_sale is not None and month_index(first_sale) > current_month - 12
+    is_new = first_sale is not None and month_index(first_sale) > current_month - ASSORTMENT_MONTHS
     return Assortment(segment, is_new, markup, sold, tuple(flags))

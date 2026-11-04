@@ -1,3 +1,4 @@
+from collections.abc import Mapping
 from datetime import date
 from itertools import groupby
 from pathlib import Path
@@ -6,10 +7,12 @@ from openpyxl import Workbook
 from openpyxl.styles import Font
 
 from purchase_planning.facts import PlanFacts, Segment
+from purchase_planning.parameters import STALE_EXPORT_DAYS, run_parameters
 
 
 def write_report(
-    facts: PlanFacts, path: str | Path, *, run_date: date | None = None
+    facts: PlanFacts, path: str | Path, *, run_date: date | None = None,
+    parameters: Mapping[str, str | int | float] | None = None,
 ) -> None:
     if run_date is None:
         run_date = date.today()
@@ -19,7 +22,7 @@ def write_report(
     assert sheet is not None
     sheet.title = "Заказ по поставщикам"
     sheet.append(("Дата среза", facts.cutoff.isoformat()))
-    status = "черновик, не размещать" if (run_date - facts.cutoff).days > 35 else None
+    status = "черновик, не размещать" if (run_date - facts.cutoff).days > STALE_EXPORT_DAYS else None
     sheet.append(("Статус", status))
     if facts.cutoff_warning:
         sheet.append(("Предупреждение", facts.cutoff_warning))
@@ -80,4 +83,13 @@ def write_report(
             for cell in sheet[sheet.max_row]:
                 cell.font = Font(bold=True)
 
+    parameter_sheet = workbook.create_sheet("Параметры")
+    parameter_sheet.append(("Параметр", "Значение"))
+    parameter_sheet.append(("Дата среза", facts.cutoff.isoformat()))
+    parameter_sheet.append(("Дата расчёта", facts.as_of.isoformat()))
+    parameter_sheet.append(("Дата запуска", run_date.isoformat()))
+    for name, value in (run_parameters() if parameters is None else parameters).items():
+        parameter_sheet.append((name, value))
+    parameter_sheet.column_dimensions["A"].width = 60
+    parameter_sheet.column_dimensions["B"].width = 115
     workbook.save(path)

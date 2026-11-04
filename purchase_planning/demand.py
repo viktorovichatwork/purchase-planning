@@ -10,6 +10,10 @@ MONTHS_PER_YEAR = 12
 PROFILE_START_YEAR = 2020
 PROFILE_END_YEAR = 2025
 ROUNDING_TOLERANCE = 1e-15
+SEASON_PEAK_MONTHS = 3
+SEASON_PEAK_SHARE = 0.5
+SEASON_WINDOW_SHARE = 0.8
+MIN_OWN_DEMAND_MONTHS = 3
 
 
 @dataclass(frozen=True)
@@ -24,12 +28,12 @@ def _season_window(monthly_totals: list[float], annual_total: float) -> tuple[in
     # Doubling the calendar lets consecutive windows cross December.
     calendar = monthly_totals * 2
     starts = range(MONTHS_PER_YEAR)
-    peak = max(sum(calendar[start:start + 3]) for start in starts)
-    half = annual_total * 0.5
+    peak = max(sum(calendar[start:start + SEASON_PEAK_MONTHS]) for start in starts)
+    half = annual_total * SEASON_PEAK_SHARE
     if peak < half and not isclose(peak, half, rel_tol=ROUNDING_TOLERANCE):
         return ()
 
-    threshold = annual_total * 0.8
+    threshold = annual_total * SEASON_WINDOW_SHARE
     for length in range(1, MONTHS_PER_YEAR + 1):
         window_totals = [sum(calendar[start:start + length]) for start in starts]
         highest_total = max(window_totals)
@@ -113,7 +117,7 @@ def apply_analog_levels(
 
     demand = own_demand.copy()
     for sku, own in own_demand.items():
-        if own.eligible_months >= 3 or sku in skus_with_sales:
+        if own.eligible_months >= MIN_OWN_DEMAND_MONTHS or sku in skus_with_sales:
             continue
         sku_group = groups.get(sku)
         analog_levels = [] if sku_group is None else [
