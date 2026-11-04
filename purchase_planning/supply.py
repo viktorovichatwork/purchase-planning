@@ -12,6 +12,7 @@ MIN_ORDERS = 5
 DEFAULT_DELAY_DAYS = 20
 MIN_IMPORT_LEAD_DAYS = 30
 MAX_TRANSIT_OVERDUE_DAYS = 30
+ORDER_TAIL_SHARE = 0.10
 
 
 @dataclass(frozen=True)
@@ -193,11 +194,10 @@ def read_supply(
         for supplier in sorted({row["supplier_id"] for row in tables["sku_dim"]})
     }
     receipts = [receipt for group in receipts_by_supplier.values() for receipt in group]
-    open_lines = [
-        line for group in orders_by_supplier.values() for line in group
-        if as_of == cutoff and line.status == "open"
+    orders = [
+        line for group in orders_by_supplier.values() for line in group if as_of == cutoff
     ]
-    return timing, receipts, open_lines
+    return timing, receipts, orders
 
 
 def classify_transit(
@@ -218,7 +218,7 @@ def classify_transit(
             flags[line.sku].add("Нет количества заказа для проверки недопоставки")
         elif line.received < line.ordered:
             shortage = line.ordered - line.received
-            limit = line.ordered * 0.10
+            limit = line.ordered * ORDER_TAIL_SHARE
             is_tail = shortage <= limit or isclose(shortage, limit, rel_tol=1e-12)
             flags[line.sku].add("Хвост заказа" if is_tail else "Зависший заказ")
     return arrivals, flags

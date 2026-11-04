@@ -43,6 +43,7 @@ class Recommendation:
     markup_pct_12m: float | None = None
     sales_qty_12m: float = 0.0
     sku_flags: tuple[str, ...] = ()
+    stockout_risk: bool = False
 
 
 @dataclass(frozen=True)

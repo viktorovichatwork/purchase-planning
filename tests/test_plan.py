@@ -1,4 +1,6 @@
 import csv
+import json
+import shutil
 from datetime import date, timedelta
 from pathlib import Path
 
@@ -7,6 +9,7 @@ from openpyxl import load_workbook
 
 from purchase_planning import ExportValidationError, plan, write_report
 from purchase_planning.facts import Segment
+from purchase_planning.runs import run_plan
 
 
 @pytest.fixture
@@ -549,3 +552,91 @@ def test_pilot_export_partitions_every_sku_and_flags_missing_supplier_timing(tmp
                 assert all(row[2] == 0 for row in data)
     finally:
         workbook.close()
+
+def test_same_export_produces_identical_facts(export):
+    assert plan(export) == plan(export)
+
+
+def test_run_history_compares_the_same_export_and_preserves_parameters(export, tmp_path):
+    history = tmp_path / "runs"
+    first = run_plan(export, history)
+    second = run_plan(export, history)
+    assert first != second
+    assert (first / "facts.json").read_bytes() == (second / "facts.json").read_bytes()
+    assert json.loads((first / "diff.json").read_text(encoding="utf-8"))["previous_run"] is None
+    assert json.loads((second / "diff.json").read_text(encoding="utf-8")) == {
+        "previous_run": first.name,
+        "changes": [],
+    }
+    parameters = json.loads((second / "parameters.json").read_text(encoding="utf-8"))
+    with (second / "report.xlsx").open("rb") as report:
+        workbook = load_workbook(report, read_only=True)
+        try:
+            values = dict(list(workbook["Параметры"].values)[1:])
+            assert values["Порог устаревания, дней"] == parameters["Порог устаревания, дней"] == 35
+            assert values["Выход из пересмотра, %"] == 30
+        finally:
+            workbook.close()
+
+def test_run_comparison_uses_saved_segment_and_observed_drivers(export, tmp_path):
+    history = tmp_path / "runs"
+    sales = export / "sales_monthly.csv"
+    sales.write_text(
+        sales.read_text(encoding="utf-8").replace(",880,", ",20,").replace(",30,0\n", ",18,0\n"),
+        encoding="utf-8",
+    )
+    orders = export / "purchase_orders.csv"
+    with orders.open("a", encoding="utf-8") as source:
+        source.write("PO-2,SKU-1,SUP-1,import,2026-02-01,2026-08-20,200,open,10,10,0,10\n")
+
+    first = run_plan(export, history)
+    sales.write_text(sales.read_text(encoding="utf-8").replace(",18,0\n", ",27,0\n"), encoding="utf-8")
+    assert plan(export).recommendations[0].segment == Segment.PURCHASE
+
+    orders.write_text(
+        orders.read_text(encoding="utf-8").replace(",open,", ",closed,"),
+        encoding="utf-8",
+    )
+    with (export / "receipts.csv").open("a", encoding="utf-8") as source:
+        source.write("SKU-1,2026-08-10,10,SUP-1,import\n")
+    second = run_plan(export, history)
+    facts = json.loads((second / "facts.json").read_text(encoding="utf-8"))
+    assert facts["recommendations"][0]["segment"] == Segment.REVIEW
+
+    sales.write_text(sales.read_text(encoding="utf-8").replace(",27,0\n", ",30,0\n"), encoding="utf-8")
+    # Compare against the first run to exercise the same observed inputs in one change.
+    direct = tmp_path / "direct"
+    direct.mkdir()
+    shutil.copytree(first, direct / first.name)
+    third = run_plan(export, direct)
+    diff = json.loads((third / "diff.json").read_text(encoding="utf-8"))
+    assert diff["previous_run"] == first.name
+    change, = diff["changes"]
+    assert change["sku_id"] == "SKU-1"
+    assert change["segment"] == [Segment.REVIEW, Segment.PURCHASE]
+    assert change["order_qty"][0] == 0 < change["order_qty"][1]
+    assert change["stockout_risk"] == [False, True]
+    assert change["drivers"] == ["sales", "receipt", "order_cancelled"]
+    assert change["flags"] == []
+
+def test_parameter_change_explains_new_risk_and_recovery(export, tmp_path, monkeypatch):
+    from purchase_planning import segments
+
+    history = tmp_path / "runs"
+    run_plan(export, history)
+
+    monkeypatch.setattr(segments, "RECOVERY_MARKUP_PCT", 35)
+    monkeypatch.setattr(segments, "REVIEW_MARKUP_PCT", 31)
+    second = run_plan(export, history)
+    change, = json.loads((second / "diff.json").read_text(encoding="utf-8"))["changes"]
+    assert change["segment"] == [Segment.PURCHASE, Segment.REVIEW]
+    assert change["stockout_risk"] == [True, False]
+    assert change["drivers"] == ["parameter_changed"]
+
+    monkeypatch.setattr(segments, "REVIEW_MARKUP_PCT", 20)
+    monkeypatch.setattr(segments, "RECOVERY_MARKUP_PCT", 30)
+    third = run_plan(export, history)
+    change, = json.loads((third / "diff.json").read_text(encoding="utf-8"))["changes"]
+    assert change["segment"] == [Segment.REVIEW, Segment.PURCHASE]
+    assert change["stockout_risk"] == [False, True]
+    assert change["drivers"] == ["parameter_changed"]
