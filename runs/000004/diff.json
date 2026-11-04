@@ -1,0 +1,2038 @@
+{
+  "changes": [
+    {
+      "drivers": [
+        "parameter_changed"
+      ],
+      "flags": [],
+      "order_qty": [
+        5000,
+        5100
+      ],
+      "segment": [
+        "К закупке",
+        "К закупке"
+      ],
+      "sku_id": "SKU-00AC5B",
+      "stockout_risk": [
+        true,
+        true
+      ]
+    },
+    {
+      "drivers": [
+        "parameter_changed"
+      ],
+      "flags": [],
+      "order_qty": [
+        1064,
+        1056
+      ],
+      "segment": [
+        "Условно к закупке",
+        "Условно к закупке"
+      ],
+      "sku_id": "SKU-05126E",
+      "stockout_risk": [
+        true,
+        true
+      ]
+    },
+    {
+      "drivers": [
+        "parameter_changed"
+      ],
+      "flags": [],
+      "order_qty": [
+        3724,
+        3828
+      ],
+      "segment": [
+        "К закупке",
+        "К закупке"
+      ],
+      "sku_id": "SKU-06C7C9",
+      "stockout_risk": [
+        false,
+        false
+      ]
+    },
+    {
+      "drivers": [
+        "parameter_changed"
+      ],
+      "flags": [],
+      "order_qty": [
+        11540,
+        11850
+      ],
+      "segment": [
+        "К закупке",
+        "К закупке"
+      ],
+      "sku_id": "SKU-0A6B6D",
+      "stockout_risk": [
+        false,
+        false
+      ]
+    },
+    {
+      "drivers": [
+        "parameter_changed"
+      ],
+      "flags": [],
+      "order_qty": [
+        141,
+        144
+      ],
+      "segment": [
+        "К закупке",
+        "К закупке"
+      ],
+      "sku_id": "SKU-0B1733",
+      "stockout_risk": [
+        false,
+        false
+      ]
+    },
+    {
+      "drivers": [
+        "parameter_changed"
+      ],
+      "flags": [],
+      "order_qty": [
+        2810,
+        2824
+      ],
+      "segment": [
+        "К закупке",
+        "К закупке"
+      ],
+      "sku_id": "SKU-0CA2C4",
+      "stockout_risk": [
+        true,
+        true
+      ]
+    },
+    {
+      "drivers": [
+        "parameter_changed"
+      ],
+      "flags": [],
+      "order_qty": [
+        417,
+        415
+      ],
+      "segment": [
+        "К закупке",
+        "К закупке"
+      ],
+      "sku_id": "SKU-180C5E",
+      "stockout_risk": [
+        true,
+        true
+      ]
+    },
+    {
+      "drivers": [
+        "parameter_changed"
+      ],
+      "flags": [],
+      "order_qty": [
+        3430,
+        3570
+      ],
+      "segment": [
+        "К закупке",
+        "К закупке"
+      ],
+      "sku_id": "SKU-18C5A1",
+      "stockout_risk": [
+        false,
+        false
+      ]
+    },
+    {
+      "drivers": [
+        "parameter_changed"
+      ],
+      "flags": [],
+      "order_qty": [
+        3586,
+        3710
+      ],
+      "segment": [
+        "К закупке",
+        "К закупке"
+      ],
+      "sku_id": "SKU-1BBB40",
+      "stockout_risk": [
+        false,
+        false
+      ]
+    },
+    {
+      "drivers": [
+        "parameter_changed"
+      ],
+      "flags": [],
+      "order_qty": [
+        1210,
+        1205
+      ],
+      "segment": [
+        "К закупке",
+        "К закупке"
+      ],
+      "sku_id": "SKU-251A6E",
+      "stockout_risk": [
+        true,
+        true
+      ]
+    },
+    {
+      "drivers": [
+        "parameter_changed"
+      ],
+      "flags": [],
+      "order_qty": [
+        330,
+        340
+      ],
+      "segment": [
+        "К закупке",
+        "К закупке"
+      ],
+      "sku_id": "SKU-28E1BD",
+      "stockout_risk": [
+        true,
+        true
+      ]
+    },
+    {
+      "drivers": [
+        "parameter_changed"
+      ],
+      "flags": [],
+      "order_qty": [
+        500,
+        450
+      ],
+      "segment": [
+        "К закупке",
+        "К закупке"
+      ],
+      "sku_id": "SKU-2C28B5",
+      "stockout_risk": [
+        true,
+        true
+      ]
+    },
+    {
+      "drivers": [
+        "parameter_changed"
+      ],
+      "flags": [],
+      "order_qty": [
+        839,
+        885
+      ],
+      "segment": [
+        "К закупке",
+        "К закупке"
+      ],
+      "sku_id": "SKU-2D442B",
+      "stockout_risk": [
+        false,
+        false
+      ]
+    },
+    {
+      "drivers": [
+        "parameter_changed"
+      ],
+      "flags": [],
+      "order_qty": [
+        2098,
+        2158
+      ],
+      "segment": [
+        "К закупке",
+        "К закупке"
+      ],
+      "sku_id": "SKU-33F43E",
+      "stockout_risk": [
+        false,
+        false
+      ]
+    },
+    {
+      "drivers": [
+        "parameter_changed"
+      ],
+      "flags": [],
+      "order_qty": [
+        73,
+        74
+      ],
+      "segment": [
+        "Условно к закупке",
+        "Условно к закупке"
+      ],
+      "sku_id": "SKU-34A8DC",
+      "stockout_risk": [
+        false,
+        false
+      ]
+    },
+    {
+      "drivers": [
+        "parameter_changed"
+      ],
+      "flags": [],
+      "order_qty": [
+        300,
+        200
+      ],
+      "segment": [
+        "К закупке",
+        "К закупке"
+      ],
+      "sku_id": "SKU-35749F",
+      "stockout_risk": [
+        false,
+        false
+      ]
+    },
+    {
+      "drivers": [
+        "parameter_changed"
+      ],
+      "flags": [],
+      "order_qty": [
+        700,
+        703
+      ],
+      "segment": [
+        "К закупке",
+        "К закупке"
+      ],
+      "sku_id": "SKU-38A254",
+      "stockout_risk": [
+        true,
+        true
+      ]
+    },
+    {
+      "drivers": [
+        "parameter_changed"
+      ],
+      "flags": [],
+      "order_qty": [
+        540,
+        542
+      ],
+      "segment": [
+        "К закупке",
+        "К закупке"
+      ],
+      "sku_id": "SKU-38EEF1",
+      "stockout_risk": [
+        true,
+        true
+      ]
+    },
+    {
+      "drivers": [
+        "parameter_changed"
+      ],
+      "flags": [],
+      "order_qty": [
+        975,
+        1002
+      ],
+      "segment": [
+        "К закупке",
+        "К закупке"
+      ],
+      "sku_id": "SKU-3AED04",
+      "stockout_risk": [
+        false,
+        false
+      ]
+    },
+    {
+      "drivers": [
+        "parameter_changed"
+      ],
+      "flags": [],
+      "order_qty": [
+        1432,
+        1461
+      ],
+      "segment": [
+        "К закупке",
+        "К закупке"
+      ],
+      "sku_id": "SKU-3C1D79",
+      "stockout_risk": [
+        false,
+        false
+      ]
+    },
+    {
+      "drivers": [
+        "parameter_changed"
+      ],
+      "flags": [],
+      "order_qty": [
+        1000,
+        1020
+      ],
+      "segment": [
+        "К закупке",
+        "К закупке"
+      ],
+      "sku_id": "SKU-3D1C58",
+      "stockout_risk": [
+        false,
+        false
+      ]
+    },
+    {
+      "drivers": [
+        "parameter_changed"
+      ],
+      "flags": [],
+      "order_qty": [
+        890,
+        930
+      ],
+      "segment": [
+        "К закупке",
+        "К закупке"
+      ],
+      "sku_id": "SKU-3E3AA7",
+      "stockout_risk": [
+        false,
+        false
+      ]
+    },
+    {
+      "drivers": [
+        "parameter_changed"
+      ],
+      "flags": [],
+      "order_qty": [
+        3642,
+        3512
+      ],
+      "segment": [
+        "К закупке",
+        "К закупке"
+      ],
+      "sku_id": "SKU-3F4A92",
+      "stockout_risk": [
+        false,
+        false
+      ]
+    },
+    {
+      "drivers": [
+        "parameter_changed"
+      ],
+      "flags": [],
+      "order_qty": [
+        97,
+        96
+      ],
+      "segment": [
+        "К закупке",
+        "К закупке"
+      ],
+      "sku_id": "SKU-3FAEA9",
+      "stockout_risk": [
+        true,
+        true
+      ]
+    },
+    {
+      "drivers": [
+        "parameter_changed"
+      ],
+      "flags": [],
+      "order_qty": [
+        535,
+        533
+      ],
+      "segment": [
+        "К закупке",
+        "К закупке"
+      ],
+      "sku_id": "SKU-42C6D5",
+      "stockout_risk": [
+        true,
+        true
+      ]
+    },
+    {
+      "drivers": [
+        "parameter_changed"
+      ],
+      "flags": [],
+      "order_qty": [
+        80,
+        85
+      ],
+      "segment": [
+        "К закупке",
+        "К закупке"
+      ],
+      "sku_id": "SKU-471E63",
+      "stockout_risk": [
+        false,
+        false
+      ]
+    },
+    {
+      "drivers": [
+        "parameter_changed"
+      ],
+      "flags": [],
+      "order_qty": [
+        1838,
+        1888
+      ],
+      "segment": [
+        "К закупке",
+        "К закупке"
+      ],
+      "sku_id": "SKU-492E6A",
+      "stockout_risk": [
+        false,
+        false
+      ]
+    },
+    {
+      "drivers": [
+        "parameter_changed"
+      ],
+      "flags": [],
+      "order_qty": [
+        304,
+        315
+      ],
+      "segment": [
+        "К закупке",
+        "К закупке"
+      ],
+      "sku_id": "SKU-49F9C2",
+      "stockout_risk": [
+        false,
+        false
+      ]
+    },
+    {
+      "drivers": [
+        "parameter_changed"
+      ],
+      "flags": [],
+      "order_qty": [
+        1050,
+        1100
+      ],
+      "segment": [
+        "К закупке",
+        "К закупке"
+      ],
+      "sku_id": "SKU-4BAE05",
+      "stockout_risk": [
+        false,
+        false
+      ]
+    },
+    {
+      "drivers": [
+        "parameter_changed"
+      ],
+      "flags": [],
+      "order_qty": [
+        626,
+        649
+      ],
+      "segment": [
+        "К закупке",
+        "К закупке"
+      ],
+      "sku_id": "SKU-4C1FA1",
+      "stockout_risk": [
+        false,
+        false
+      ]
+    },
+    {
+      "drivers": [
+        "parameter_changed"
+      ],
+      "flags": [],
+      "order_qty": [
+        1082,
+        1089
+      ],
+      "segment": [
+        "К закупке",
+        "К закупке"
+      ],
+      "sku_id": "SKU-4C841C",
+      "stockout_risk": [
+        true,
+        true
+      ]
+    },
+    {
+      "drivers": [
+        "parameter_changed"
+      ],
+      "flags": [],
+      "order_qty": [
+        1570,
+        1580
+      ],
+      "segment": [
+        "К закупке",
+        "К закупке"
+      ],
+      "sku_id": "SKU-4D5BB9",
+      "stockout_risk": [
+        true,
+        true
+      ]
+    },
+    {
+      "drivers": [
+        "parameter_changed"
+      ],
+      "flags": [],
+      "order_qty": [
+        2900,
+        3000
+      ],
+      "segment": [
+        "К закупке",
+        "К закупке"
+      ],
+      "sku_id": "SKU-4E3B0C",
+      "stockout_risk": [
+        false,
+        true
+      ]
+    },
+    {
+      "drivers": [
+        "parameter_changed"
+      ],
+      "flags": [],
+      "order_qty": [
+        374,
+        373
+      ],
+      "segment": [
+        "К закупке",
+        "К закупке"
+      ],
+      "sku_id": "SKU-503683",
+      "stockout_risk": [
+        true,
+        true
+      ]
+    },
+    {
+      "drivers": [
+        "parameter_changed"
+      ],
+      "flags": [],
+      "order_qty": [
+        2000,
+        2100
+      ],
+      "segment": [
+        "К закупке",
+        "К закупке"
+      ],
+      "sku_id": "SKU-50E412",
+      "stockout_risk": [
+        false,
+        false
+      ]
+    },
+    {
+      "drivers": [
+        "parameter_changed"
+      ],
+      "flags": [],
+      "order_qty": [
+        1337,
+        1345
+      ],
+      "segment": [
+        "К закупке",
+        "К закупке"
+      ],
+      "sku_id": "SKU-516516",
+      "stockout_risk": [
+        true,
+        true
+      ]
+    },
+    {
+      "drivers": [
+        "parameter_changed"
+      ],
+      "flags": [],
+      "order_qty": [
+        1101,
+        1129
+      ],
+      "segment": [
+        "К закупке",
+        "К закупке"
+      ],
+      "sku_id": "SKU-551999",
+      "stockout_risk": [
+        false,
+        false
+      ]
+    },
+    {
+      "drivers": [
+        "parameter_changed"
+      ],
+      "flags": [],
+      "order_qty": [
+        150,
+        149
+      ],
+      "segment": [
+        "К закупке",
+        "К закупке"
+      ],
+      "sku_id": "SKU-568111",
+      "stockout_risk": [
+        true,
+        true
+      ]
+    },
+    {
+      "drivers": [
+        "parameter_changed"
+      ],
+      "flags": [],
+      "order_qty": [
+        1318,
+        1309
+      ],
+      "segment": [
+        "К закупке",
+        "К закупке"
+      ],
+      "sku_id": "SKU-577B69",
+      "stockout_risk": [
+        true,
+        true
+      ]
+    },
+    {
+      "drivers": [
+        "parameter_changed"
+      ],
+      "flags": [],
+      "order_qty": [
+        5700,
+        5900
+      ],
+      "segment": [
+        "К закупке",
+        "К закупке"
+      ],
+      "sku_id": "SKU-580B9F",
+      "stockout_risk": [
+        false,
+        false
+      ]
+    },
+    {
+      "drivers": [
+        "parameter_changed"
+      ],
+      "flags": [],
+      "order_qty": [
+        9698,
+        9748
+      ],
+      "segment": [
+        "К закупке",
+        "К закупке"
+      ],
+      "sku_id": "SKU-5A2F67",
+      "stockout_risk": [
+        true,
+        true
+      ]
+    },
+    {
+      "drivers": [
+        "parameter_changed"
+      ],
+      "flags": [],
+      "order_qty": [
+        4712,
+        4736
+      ],
+      "segment": [
+        "К закупке",
+        "К закупке"
+      ],
+      "sku_id": "SKU-5CBFA3",
+      "stockout_risk": [
+        true,
+        true
+      ]
+    },
+    {
+      "drivers": [
+        "parameter_changed"
+      ],
+      "flags": [],
+      "order_qty": [
+        10340,
+        10630
+      ],
+      "segment": [
+        "К закупке",
+        "К закупке"
+      ],
+      "sku_id": "SKU-5D3007",
+      "stockout_risk": [
+        false,
+        false
+      ]
+    },
+    {
+      "drivers": [
+        "parameter_changed"
+      ],
+      "flags": [],
+      "order_qty": [
+        2964,
+        3057
+      ],
+      "segment": [
+        "К закупке",
+        "К закупке"
+      ],
+      "sku_id": "SKU-60F18F",
+      "stockout_risk": [
+        false,
+        false
+      ]
+    },
+    {
+      "drivers": [
+        "parameter_changed"
+      ],
+      "flags": [],
+      "order_qty": [
+        3990,
+        4100
+      ],
+      "segment": [
+        "К закупке",
+        "К закупке"
+      ],
+      "sku_id": "SKU-626BD8",
+      "stockout_risk": [
+        false,
+        false
+      ]
+    },
+    {
+      "drivers": [
+        "parameter_changed"
+      ],
+      "flags": [],
+      "order_qty": [
+        1247,
+        1254
+      ],
+      "segment": [
+        "К закупке",
+        "К закупке"
+      ],
+      "sku_id": "SKU-62CAF6",
+      "stockout_risk": [
+        true,
+        true
+      ]
+    },
+    {
+      "drivers": [
+        "parameter_changed"
+      ],
+      "flags": [],
+      "order_qty": [
+        1182,
+        1211
+      ],
+      "segment": [
+        "К закупке",
+        "К закупке"
+      ],
+      "sku_id": "SKU-65A338",
+      "stockout_risk": [
+        false,
+        false
+      ]
+    },
+    {
+      "drivers": [
+        "parameter_changed"
+      ],
+      "flags": [],
+      "order_qty": [
+        3280,
+        3330
+      ],
+      "segment": [
+        "К закупке",
+        "К закупке"
+      ],
+      "sku_id": "SKU-679238",
+      "stockout_risk": [
+        false,
+        true
+      ]
+    },
+    {
+      "drivers": [
+        "parameter_changed"
+      ],
+      "flags": [],
+      "order_qty": [
+        3400,
+        3500
+      ],
+      "segment": [
+        "К закупке",
+        "К закупке"
+      ],
+      "sku_id": "SKU-691915",
+      "stockout_risk": [
+        true,
+        true
+      ]
+    },
+    {
+      "drivers": [
+        "parameter_changed"
+      ],
+      "flags": [],
+      "order_qty": [
+        1000,
+        1000
+      ],
+      "segment": [
+        "К закупке",
+        "К закупке"
+      ],
+      "sku_id": "SKU-6EB51C",
+      "stockout_risk": [
+        false,
+        true
+      ]
+    },
+    {
+      "drivers": [
+        "parameter_changed"
+      ],
+      "flags": [],
+      "order_qty": [
+        2280,
+        2290
+      ],
+      "segment": [
+        "К закупке",
+        "К закупке"
+      ],
+      "sku_id": "SKU-720E8A",
+      "stockout_risk": [
+        true,
+        true
+      ]
+    },
+    {
+      "drivers": [
+        "parameter_changed"
+      ],
+      "flags": [],
+      "order_qty": [
+        800,
+        750
+      ],
+      "segment": [
+        "К закупке",
+        "К закупке"
+      ],
+      "sku_id": "SKU-731022",
+      "stockout_risk": [
+        true,
+        true
+      ]
+    },
+    {
+      "drivers": [
+        "parameter_changed"
+      ],
+      "flags": [],
+      "order_qty": [
+        81,
+        80
+      ],
+      "segment": [
+        "К закупке",
+        "К закупке"
+      ],
+      "sku_id": "SKU-79A759",
+      "stockout_risk": [
+        true,
+        true
+      ]
+    },
+    {
+      "drivers": [
+        "parameter_changed"
+      ],
+      "flags": [],
+      "order_qty": [
+        3590,
+        3595
+      ],
+      "segment": [
+        "К закупке",
+        "К закупке"
+      ],
+      "sku_id": "SKU-79B644",
+      "stockout_risk": [
+        true,
+        true
+      ]
+    },
+    {
+      "drivers": [
+        "parameter_changed"
+      ],
+      "flags": [],
+      "order_qty": [
+        172,
+        173
+      ],
+      "segment": [
+        "К закупке",
+        "К закупке"
+      ],
+      "sku_id": "SKU-7AAB39",
+      "stockout_risk": [
+        false,
+        false
+      ]
+    },
+    {
+      "drivers": [
+        "parameter_changed"
+      ],
+      "flags": [],
+      "order_qty": [
+        2670,
+        2700
+      ],
+      "segment": [
+        "К закупке",
+        "К закупке"
+      ],
+      "sku_id": "SKU-7CE553",
+      "stockout_risk": [
+        true,
+        true
+      ]
+    },
+    {
+      "drivers": [
+        "parameter_changed"
+      ],
+      "flags": [],
+      "order_qty": [
+        4896,
+        4903
+      ],
+      "segment": [
+        "К закупке",
+        "К закупке"
+      ],
+      "sku_id": "SKU-82D8E8",
+      "stockout_risk": [
+        true,
+        true
+      ]
+    },
+    {
+      "drivers": [
+        "parameter_changed"
+      ],
+      "flags": [],
+      "order_qty": [
+        1755,
+        1803
+      ],
+      "segment": [
+        "К закупке",
+        "К закупке"
+      ],
+      "sku_id": "SKU-832FB5",
+      "stockout_risk": [
+        false,
+        false
+      ]
+    },
+    {
+      "drivers": [
+        "parameter_changed"
+      ],
+      "flags": [],
+      "order_qty": [
+        2645,
+        2649
+      ],
+      "segment": [
+        "К закупке",
+        "К закупке"
+      ],
+      "sku_id": "SKU-8ADF52",
+      "stockout_risk": [
+        true,
+        true
+      ]
+    },
+    {
+      "drivers": [
+        "parameter_changed"
+      ],
+      "flags": [],
+      "order_qty": [
+        873,
+        870
+      ],
+      "segment": [
+        "К закупке",
+        "К закупке"
+      ],
+      "sku_id": "SKU-8AF194",
+      "stockout_risk": [
+        true,
+        true
+      ]
+    },
+    {
+      "drivers": [
+        "parameter_changed"
+      ],
+      "flags": [],
+      "order_qty": [
+        687,
+        735
+      ],
+      "segment": [
+        "К закупке",
+        "К закупке"
+      ],
+      "sku_id": "SKU-8BF97A",
+      "stockout_risk": [
+        false,
+        false
+      ]
+    },
+    {
+      "drivers": [
+        "parameter_changed"
+      ],
+      "flags": [],
+      "order_qty": [
+        1336,
+        1344
+      ],
+      "segment": [
+        "К закупке",
+        "К закупке"
+      ],
+      "sku_id": "SKU-8D2C2D",
+      "stockout_risk": [
+        true,
+        true
+      ]
+    },
+    {
+      "drivers": [
+        "parameter_changed"
+      ],
+      "flags": [],
+      "order_qty": [
+        1480,
+        1510
+      ],
+      "segment": [
+        "К закупке",
+        "К закупке"
+      ],
+      "sku_id": "SKU-8F453C",
+      "stockout_risk": [
+        false,
+        false
+      ]
+    },
+    {
+      "drivers": [
+        "parameter_changed"
+      ],
+      "flags": [],
+      "order_qty": [
+        298,
+        299
+      ],
+      "segment": [
+        "К закупке",
+        "К закупке"
+      ],
+      "sku_id": "SKU-9330CE",
+      "stockout_risk": [
+        true,
+        true
+      ]
+    },
+    {
+      "drivers": [
+        "parameter_changed"
+      ],
+      "flags": [],
+      "order_qty": [
+        200,
+        190
+      ],
+      "segment": [
+        "К закупке",
+        "К закупке"
+      ],
+      "sku_id": "SKU-96CEAE",
+      "stockout_risk": [
+        true,
+        true
+      ]
+    },
+    {
+      "drivers": [
+        "parameter_changed"
+      ],
+      "flags": [],
+      "order_qty": [
+        1156,
+        1212
+      ],
+      "segment": [
+        "К закупке",
+        "К закупке"
+      ],
+      "sku_id": "SKU-982187",
+      "stockout_risk": [
+        false,
+        false
+      ]
+    },
+    {
+      "drivers": [
+        "parameter_changed"
+      ],
+      "flags": [],
+      "order_qty": [
+        810,
+        820
+      ],
+      "segment": [
+        "К закупке",
+        "К закупке"
+      ],
+      "sku_id": "SKU-986CA6",
+      "stockout_risk": [
+        true,
+        true
+      ]
+    },
+    {
+      "drivers": [
+        "parameter_changed"
+      ],
+      "flags": [],
+      "order_qty": [
+        3319,
+        3323
+      ],
+      "segment": [
+        "К закупке",
+        "К закупке"
+      ],
+      "sku_id": "SKU-990F41",
+      "stockout_risk": [
+        true,
+        true
+      ]
+    },
+    {
+      "drivers": [
+        "parameter_changed"
+      ],
+      "flags": [],
+      "order_qty": [
+        910,
+        990
+      ],
+      "segment": [
+        "К закупке",
+        "К закупке"
+      ],
+      "sku_id": "SKU-9F0CF5",
+      "stockout_risk": [
+        false,
+        false
+      ]
+    },
+    {
+      "drivers": [
+        "parameter_changed"
+      ],
+      "flags": [],
+      "order_qty": [
+        2520,
+        2523
+      ],
+      "segment": [
+        "К закупке",
+        "К закупке"
+      ],
+      "sku_id": "SKU-9F6C73",
+      "stockout_risk": [
+        true,
+        true
+      ]
+    },
+    {
+      "drivers": [
+        "parameter_changed"
+      ],
+      "flags": [],
+      "order_qty": [
+        4121,
+        4128
+      ],
+      "segment": [
+        "К закупке",
+        "К закупке"
+      ],
+      "sku_id": "SKU-A0D4D4",
+      "stockout_risk": [
+        true,
+        true
+      ]
+    },
+    {
+      "drivers": [
+        "parameter_changed"
+      ],
+      "flags": [],
+      "order_qty": [
+        4200,
+        4400
+      ],
+      "segment": [
+        "К закупке",
+        "К закупке"
+      ],
+      "sku_id": "SKU-A4B913",
+      "stockout_risk": [
+        false,
+        false
+      ]
+    },
+    {
+      "drivers": [
+        "parameter_changed"
+      ],
+      "flags": [],
+      "order_qty": [
+        1840,
+        1850
+      ],
+      "segment": [
+        "К закупке",
+        "К закупке"
+      ],
+      "sku_id": "SKU-A58AAE",
+      "stockout_risk": [
+        true,
+        true
+      ]
+    },
+    {
+      "drivers": [
+        "parameter_changed"
+      ],
+      "flags": [],
+      "order_qty": [
+        230,
+        240
+      ],
+      "segment": [
+        "К закупке",
+        "К закупке"
+      ],
+      "sku_id": "SKU-A5CBF9",
+      "stockout_risk": [
+        true,
+        true
+      ]
+    },
+    {
+      "drivers": [
+        "parameter_changed"
+      ],
+      "flags": [],
+      "order_qty": [
+        1100,
+        1050
+      ],
+      "segment": [
+        "К закупке",
+        "К закупке"
+      ],
+      "sku_id": "SKU-A62E57",
+      "stockout_risk": [
+        true,
+        true
+      ]
+    },
+    {
+      "drivers": [
+        "parameter_changed"
+      ],
+      "flags": [],
+      "order_qty": [
+        100,
+        100
+      ],
+      "segment": [
+        "К закупке",
+        "К закупке"
+      ],
+      "sku_id": "SKU-A63914",
+      "stockout_risk": [
+        false,
+        true
+      ]
+    },
+    {
+      "drivers": [
+        "parameter_changed"
+      ],
+      "flags": [],
+      "order_qty": [
+        280,
+        290
+      ],
+      "segment": [
+        "К закупке",
+        "К закупке"
+      ],
+      "sku_id": "SKU-ACF32E",
+      "stockout_risk": [
+        true,
+        true
+      ]
+    },
+    {
+      "drivers": [
+        "parameter_changed"
+      ],
+      "flags": [],
+      "order_qty": [
+        3380,
+        3506
+      ],
+      "segment": [
+        "К закупке",
+        "К закупке"
+      ],
+      "sku_id": "SKU-BB6B75",
+      "stockout_risk": [
+        false,
+        false
+      ]
+    },
+    {
+      "drivers": [
+        "parameter_changed"
+      ],
+      "flags": [],
+      "order_qty": [
+        1760,
+        1854
+      ],
+      "segment": [
+        "К закупке",
+        "К закупке"
+      ],
+      "sku_id": "SKU-BBBE73",
+      "stockout_risk": [
+        false,
+        false
+      ]
+    },
+    {
+      "drivers": [
+        "parameter_changed"
+      ],
+      "flags": [],
+      "order_qty": [
+        700,
+        740
+      ],
+      "segment": [
+        "К закупке",
+        "К закупке"
+      ],
+      "sku_id": "SKU-BDB030",
+      "stockout_risk": [
+        false,
+        false
+      ]
+    },
+    {
+      "drivers": [
+        "parameter_changed"
+      ],
+      "flags": [],
+      "order_qty": [
+        900,
+        1000
+      ],
+      "segment": [
+        "К закупке",
+        "К закупке"
+      ],
+      "sku_id": "SKU-C1DB29",
+      "stockout_risk": [
+        false,
+        false
+      ]
+    },
+    {
+      "drivers": [
+        "parameter_changed"
+      ],
+      "flags": [],
+      "order_qty": [
+        2393,
+        2444
+      ],
+      "segment": [
+        "К закупке",
+        "К закупке"
+      ],
+      "sku_id": "SKU-C331F9",
+      "stockout_risk": [
+        false,
+        false
+      ]
+    },
+    {
+      "drivers": [
+        "parameter_changed"
+      ],
+      "flags": [],
+      "order_qty": [
+        3116,
+        3131
+      ],
+      "segment": [
+        "К закупке",
+        "К закупке"
+      ],
+      "sku_id": "SKU-C47660",
+      "stockout_risk": [
+        true,
+        true
+      ]
+    },
+    {
+      "drivers": [
+        "parameter_changed"
+      ],
+      "flags": [],
+      "order_qty": [
+        2174,
+        2187
+      ],
+      "segment": [
+        "К закупке",
+        "К закупке"
+      ],
+      "sku_id": "SKU-C4AD3F",
+      "stockout_risk": [
+        true,
+        true
+      ]
+    },
+    {
+      "drivers": [
+        "parameter_changed"
+      ],
+      "flags": [],
+      "order_qty": [
+        259,
+        257
+      ],
+      "segment": [
+        "К закупке",
+        "К закупке"
+      ],
+      "sku_id": "SKU-C55C0A",
+      "stockout_risk": [
+        true,
+        true
+      ]
+    },
+    {
+      "drivers": [
+        "parameter_changed"
+      ],
+      "flags": [],
+      "order_qty": [
+        748,
+        749
+      ],
+      "segment": [
+        "К закупке",
+        "К закупке"
+      ],
+      "sku_id": "SKU-C7071B",
+      "stockout_risk": [
+        true,
+        true
+      ]
+    },
+    {
+      "drivers": [
+        "parameter_changed"
+      ],
+      "flags": [],
+      "order_qty": [
+        409,
+        422
+      ],
+      "segment": [
+        "К закупке",
+        "К закупке"
+      ],
+      "sku_id": "SKU-C74ECA",
+      "stockout_risk": [
+        false,
+        false
+      ]
+    },
+    {
+      "drivers": [
+        "parameter_changed"
+      ],
+      "flags": [],
+      "order_qty": [
+        4600,
+        4700
+      ],
+      "segment": [
+        "К закупке",
+        "К закупке"
+      ],
+      "sku_id": "SKU-CE3291",
+      "stockout_risk": [
+        false,
+        false
+      ]
+    },
+    {
+      "drivers": [
+        "parameter_changed"
+      ],
+      "flags": [],
+      "order_qty": [
+        0,
+        0
+      ],
+      "segment": [
+        "Условно к закупке",
+        "К закупке"
+      ],
+      "sku_id": "SKU-CE59B5",
+      "stockout_risk": [
+        true,
+        true
+      ]
+    },
+    {
+      "drivers": [
+        "parameter_changed"
+      ],
+      "flags": [],
+      "order_qty": [
+        258,
+        271
+      ],
+      "segment": [
+        "К закупке",
+        "К закупке"
+      ],
+      "sku_id": "SKU-D05272",
+      "stockout_risk": [
+        false,
+        false
+      ]
+    },
+    {
+      "drivers": [
+        "parameter_changed"
+      ],
+      "flags": [],
+      "order_qty": [
+        3537,
+        3557
+      ],
+      "segment": [
+        "К закупке",
+        "К закупке"
+      ],
+      "sku_id": "SKU-D37943",
+      "stockout_risk": [
+        true,
+        true
+      ]
+    },
+    {
+      "drivers": [
+        "parameter_changed"
+      ],
+      "flags": [],
+      "order_qty": [
+        1735,
+        1721
+      ],
+      "segment": [
+        "К закупке",
+        "К закупке"
+      ],
+      "sku_id": "SKU-D55358",
+      "stockout_risk": [
+        true,
+        true
+      ]
+    },
+    {
+      "drivers": [
+        "parameter_changed"
+      ],
+      "flags": [],
+      "order_qty": [
+        372,
+        383
+      ],
+      "segment": [
+        "К закупке",
+        "К закупке"
+      ],
+      "sku_id": "SKU-D5CA89",
+      "stockout_risk": [
+        false,
+        false
+      ]
+    },
+    {
+      "drivers": [
+        "parameter_changed"
+      ],
+      "flags": [],
+      "order_qty": [
+        2183,
+        2249
+      ],
+      "segment": [
+        "К закупке",
+        "К закупке"
+      ],
+      "sku_id": "SKU-D924B1",
+      "stockout_risk": [
+        false,
+        false
+      ]
+    },
+    {
+      "drivers": [
+        "parameter_changed"
+      ],
+      "flags": [],
+      "order_qty": [
+        2283,
+        2336
+      ],
+      "segment": [
+        "К закупке",
+        "К закупке"
+      ],
+      "sku_id": "SKU-D99D5E",
+      "stockout_risk": [
+        false,
+        true
+      ]
+    },
+    {
+      "drivers": [
+        "parameter_changed"
+      ],
+      "flags": [],
+      "order_qty": [
+        11,
+        13
+      ],
+      "segment": [
+        "К закупке",
+        "К закупке"
+      ],
+      "sku_id": "SKU-DEDBC2",
+      "stockout_risk": [
+        false,
+        false
+      ]
+    },
+    {
+      "drivers": [
+        "parameter_changed"
+      ],
+      "flags": [],
+      "order_qty": [
+        1220,
+        1260
+      ],
+      "segment": [
+        "К закупке",
+        "К закупке"
+      ],
+      "sku_id": "SKU-E31DBF",
+      "stockout_risk": [
+        false,
+        false
+      ]
+    },
+    {
+      "drivers": [
+        "parameter_changed"
+      ],
+      "flags": [],
+      "order_qty": [
+        3861,
+        3805
+      ],
+      "segment": [
+        "К закупке",
+        "К закупке"
+      ],
+      "sku_id": "SKU-E35D69",
+      "stockout_risk": [
+        true,
+        true
+      ]
+    },
+    {
+      "drivers": [
+        "parameter_changed"
+      ],
+      "flags": [],
+      "order_qty": [
+        200,
+        100
+      ],
+      "segment": [
+        "К закупке",
+        "К закупке"
+      ],
+      "sku_id": "SKU-ED19B7",
+      "stockout_risk": [
+        false,
+        false
+      ]
+    },
+    {
+      "drivers": [
+        "parameter_changed"
+      ],
+      "flags": [],
+      "order_qty": [
+        130,
+        133
+      ],
+      "segment": [
+        "К закупке",
+        "К закупке"
+      ],
+      "sku_id": "SKU-EDFFFB",
+      "stockout_risk": [
+        false,
+        false
+      ]
+    },
+    {
+      "drivers": [
+        "parameter_changed"
+      ],
+      "flags": [],
+      "order_qty": [
+        2200,
+        2300
+      ],
+      "segment": [
+        "К закупке",
+        "К закупке"
+      ],
+      "sku_id": "SKU-F0589E",
+      "stockout_risk": [
+        false,
+        false
+      ]
+    },
+    {
+      "drivers": [
+        "parameter_changed"
+      ],
+      "flags": [],
+      "order_qty": [
+        432,
+        451
+      ],
+      "segment": [
+        "К закупке",
+        "К закупке"
+      ],
+      "sku_id": "SKU-F31B56",
+      "stockout_risk": [
+        false,
+        false
+      ]
+    },
+    {
+      "drivers": [
+        "parameter_changed"
+      ],
+      "flags": [],
+      "order_qty": [
+        1274,
+        1305
+      ],
+      "segment": [
+        "К закупке",
+        "К закупке"
+      ],
+      "sku_id": "SKU-F463A0",
+      "stockout_risk": [
+        false,
+        false
+      ]
+    },
+    {
+      "drivers": [
+        "parameter_changed"
+      ],
+      "flags": [],
+      "order_qty": [
+        710,
+        722
+      ],
+      "segment": [
+        "К закупке",
+        "К закупке"
+      ],
+      "sku_id": "SKU-F4A063",
+      "stockout_risk": [
+        true,
+        true
+      ]
+    },
+    {
+      "drivers": [
+        "parameter_changed"
+      ],
+      "flags": [],
+      "order_qty": [
+        12610,
+        12681
+      ],
+      "segment": [
+        "К закупке",
+        "К закупке"
+      ],
+      "sku_id": "SKU-F4FE31",
+      "stockout_risk": [
+        true,
+        true
+      ]
+    },
+    {
+      "drivers": [
+        "parameter_changed"
+      ],
+      "flags": [],
+      "order_qty": [
+        3545,
+        3656
+      ],
+      "segment": [
+        "К закупке",
+        "К закупке"
+      ],
+      "sku_id": "SKU-F8FBFF",
+      "stockout_risk": [
+        false,
+        false
+      ]
+    },
+    {
+      "drivers": [
+        "parameter_changed"
+      ],
+      "flags": [],
+      "order_qty": [
+        4300,
+        4400
+      ],
+      "segment": [
+        "К закупке",
+        "К закупке"
+      ],
+      "sku_id": "SKU-FC4385",
+      "stockout_risk": [
+        false,
+        true
+      ]
+    }
+  ],
+  "previous_run": "000003"
+}
