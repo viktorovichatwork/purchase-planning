@@ -31,6 +31,11 @@ class PurchaseLine:
     ordered: float
     received: float
     pending: float
+    confirmed: float | None = None
+
+    @property
+    def is_unconfirmed(self) -> bool:
+        return self.status == "open" and self.confirmed == 0
 
     @property
     def batch(self) -> str | tuple[date, date | None]:
@@ -52,6 +57,8 @@ def _purchase_line(row: dict[str, str]) -> PurchaseLine:
         planned = row["planned_lead_days"]
         planned_lead_days = finite_quantity(planned) if planned else None
         ordered = finite_quantity(row["qty_ordered"])
+        confirmed = row["qty_confirmed"].strip()
+        confirmed_qty = finite_quantity(confirmed) if confirmed else None
         received = finite_quantity(row["qty_received"])
         pending = finite_quantity(row["qty_pending"])
     except ValueError:
@@ -60,7 +67,7 @@ def _purchase_line(row: dict[str, str]) -> PurchaseLine:
         ]) from None
     return PurchaseLine(
         row["po_id"], row["sku_id"], row["supplier_id"], placed, promised, planned_lead_days,
-        row["status"], ordered, received, pending,
+        row["status"], ordered, received, pending, confirmed_qty,
     )
 
 
@@ -226,6 +233,8 @@ def classify_transit(
     arrivals: dict[str, dict[date, float]] = defaultdict(lambda: defaultdict(float))
     flags: dict[str, set[str]] = defaultdict(set)
     for line in open_lines:
+        if line.is_unconfirmed:
+            flags[line.sku].add(OrderFlag.UNCONFIRMED)
         if line.promised is None or line.promised < line.placed:
             flags[line.sku].add("Нет корректной даты прихода")
         elif (as_of - line.promised).days <= MAX_TRANSIT_OVERDUE_DAYS:

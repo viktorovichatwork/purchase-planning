@@ -48,13 +48,14 @@ def run_backtest(data_dir: str | Path) -> BacktestResult:
     sales_rows, stock, partial_months = read_monthly_history(tables)
     orders, receipts = read_supply_history(tables)
     cutoff, _ = _read_cutoff(
-        directory / "export_meta.json", [sale.month for _, sale in sales_rows if sale.month not in partial_months],
-        orders, receipts,
+        directory / "export_meta.json", sales_rows, partial_months, orders, receipts,
     )
-    sales: dict[tuple[str, date], float] = defaultdict(float)
+    net_sales: dict[tuple[str, date], float] = defaultdict(float)
+    gross_sales: dict[tuple[str, date], float] = defaultdict(float)
     for sku, sale in sales_rows:
         if sale.month <= cutoff and sale.month not in partial_months:
-            sales[sku, sale.month] += sale.quantity
+            net_sales[sku, sale.month] += sale.net_quantity
+            gross_sales[sku, sale.month] += sale.quantity
 
     windows: dict[tuple[str, str], list[tuple[float, float, float]]] = defaultdict(list)
     ratios: dict[DemandType, list[float]] = defaultdict(list)
@@ -85,12 +86,12 @@ def run_backtest(data_dir: str | Path) -> BacktestResult:
             if not shares:
                 continue
             sku = row.sku_id
-            if any(is_stockout_month(stock.get((sku, month), 0.0), sales[sku, month]) for month, _ in shares):
+            if any(is_stockout_month(stock.get((sku, month), 0.0), gross_sales[sku, month]) for month, _ in shares):
                 continue
-            actual = fsum(sales[sku, month] * share for month, share in shares)
+            actual = fsum(net_sales[sku, month] * share for month, share in shares)
             forecast = fsum(row.monthly_forecast)
             baseline = (
-                fsum(sales[sku, month] for month in baseline_months) / len(baseline_months)
+                fsum(net_sales[sku, month] for month in baseline_months) / len(baseline_months)
                 * fsum(share for _, share in shares)
             )
             window = (actual, forecast, baseline)
