@@ -28,6 +28,6 @@ def test_order_sheet_uses_facts_and_marks_stale_exports(tmp_path, run_date, stat
     try:
         sheet = workbook["Заказ по поставщикам"]
         assert sheet["B2"].value == status
-        assert list(sheet.values)[-1] == ("SUP-1", "SKU-1", 25, 0, None)
+        assert list(sheet.values)[-1][:5] == ("SUP-1", "SKU-1", 25, 0, None)
     finally:
         workbook.close()

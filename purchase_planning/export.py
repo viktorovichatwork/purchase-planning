@@ -1,4 +1,5 @@
 import csv
+from math import isfinite
 from pathlib import Path
 
 
@@ -25,6 +26,13 @@ class ExportValidationError(ValueError):
     def __init__(self, reasons: list[str]) -> None:
         self.reasons = tuple(reasons)
         super().__init__("Выгрузка отклонена:\n" + "\n".join(f"- {reason}" for reason in reasons))
+
+
+def finite_quantity(value: str) -> float:
+    quantity = float(value)
+    if not isfinite(quantity):
+        raise ValueError
+    return quantity
 
 
 def read_export(data_dir: Path) -> dict[str, list[dict[str, str]]]:
