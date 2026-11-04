@@ -336,12 +336,13 @@ def _order_table(
         batch_lines = []
         quantities = Counter()
         for batch in schedule.batches:
-            quantities[batch.seasonal, batch.deadline] += batch.quantity
+            # A passed deadline cannot be met any more: every overdue batch is placed now.
+            quantities[batch.seasonal, max(batch.deadline, as_of)] += batch.quantity
         for (seasonal, deadline), quantity in sorted(quantities.items()):
             label = "Сезонная партия" if seasonal else "Обычная партия"
             batch_date = f"до {_date(deadline)}" if seasonal else _date(deadline)
-            if not seasonal and deadline <= as_of:
-                batch_date = f"Сейчас · срок {batch_date}"
+            if deadline <= as_of:
+                batch_date = "Сейчас"
             batch_lines.append(f'<span class="batch">{label} — {batch_date} — {quantity} шт.</span>')
         ordinary, conditional = [], []
         for row in schedule.lines:

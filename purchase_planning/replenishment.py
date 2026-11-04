@@ -1,6 +1,6 @@
 from dataclasses import dataclass, replace
 from datetime import date, timedelta
-from math import ceil, fsum, isclose
+from math import fsum, isclose
 
 from purchase_planning.calibration import stock_multiplier
 from purchase_planning.facts import (
@@ -55,7 +55,12 @@ class InventoryPlan:
 
     def regular_order(
         self, placed: date, lead: int, cycle: int, multiplier: float, stock_at_arrival: float,
-    ) -> tuple[Replenishment, int]:
+    ) -> Replenishment:
+        """Order for the cycle after arrival, sized for sales running `multiplier` times the forecast.
+
+        Under that stress scenario the stock left at arrival shrinks by the extra sales before
+        arrival, but never below zero: sales lost before arrival need no safety stock.
+        """
         arrival = placed + timedelta(days=lead)
         start = arrival + DAY
         end = start + timedelta(days=cycle)
@@ -63,11 +68,24 @@ class InventoryPlan:
             window_start, window_end = self.season_window(start)
             end = start if start >= window_start else min(end, window_start)
             if window_start <= arrival < window_end or end <= start:
-                return Replenishment(stock_at_arrival, 0.0, 0.0), 0
-        forecast = self.demand(placed + DAY, end, outside_season=True)
-        safety = (multiplier - 1) * forecast
-        safety_days = ceil((multiplier - 1) * (end - placed - DAY).days) if forecast > 0 else 0
-        return Replenishment(stock_at_arrival, self.demand(start, end) + safety, safety), safety_days
+                return Replenishment(stock_at_arrival, 0.0, 0.0)
+        extra = multiplier - 1
+        extra_before_arrival = extra * self.demand(placed + DAY, start, outside_season=True)
+        stressed_stock = max(0.0, stock_at_arrival - extra_before_arrival)
+        safety = extra * self.demand(start, end, outside_season=True) + stock_at_arrival - stressed_stock
+        return Replenishment(stock_at_arrival, self.demand(start, end) + safety, safety)
+
+    def stressed_stockout(self, multiplier: float, end: date) -> date | None:
+        """First day without stock if sales outside the season run `multiplier` times the forecast."""
+        season = self.profile.season_window
+        weights = tuple(
+            weight if month in season else weight * multiplier
+            for month, weight in enumerate(self.profile.weights, start=1)
+        )
+        return project_stock(
+            self.stock, self.arrivals, replace(self.profile, weights=weights), self.annual_demand,
+            start=self.as_of + DAY, end=end, snapshot_at=end,
+        ).first_stockout
 
     def season_window(self, day: date) -> tuple[date, date]:
         months = self.profile.season_window
@@ -170,20 +188,22 @@ def plan_inventory(
     regular_receipt: tuple[date, int] | None = None
     regular_qty = 0.0
     if lead is not None and cycle is not None:
-        regular, safety_days = inventory.regular_order(
+        regular = inventory.regular_order(
             as_of, lead, cycle, ordinary_multiplier, projection.stock_at_snapshot,
         )
         threshold = max(threshold, multiple + inventory.demand(start, cycle_start) + regular.target_stock)
         if can_order:
             placed = as_of
             if stock_until is not None:
-                regular_deadline = stock_until - timedelta(days=lead + safety_days)
+                # The order has to arrive before the stock runs out even if sales run faster than forecast.
+                stressed_until = inventory.stressed_stockout(ordinary_multiplier, end) or stock_until
+                regular_deadline = stressed_until - timedelta(days=lead)
                 placed = max(as_of, regular_deadline)
             if batch is not None:
                 placed = batch.placement
             snapshot = placed + timedelta(days=lead + 1)
             if placed > as_of:
-                regular, _ = inventory.regular_order(placed, lead, cycle, ordinary_multiplier, inventory.stock_before(snapshot))
+                regular = inventory.regular_order(placed, lead, cycle, ordinary_multiplier, inventory.stock_before(snapshot))
             regular_qty = regular.quantity
             if regular_qty > 0:
                 threshold = max(threshold, multiple + inventory.demand(start, snapshot) + regular.target_stock)
@@ -212,7 +232,7 @@ def plan_inventory(
                 cycle_start + timedelta(days=cycle)
             ):
                 regular_deadline = season_end - timedelta(days=lead + 1)
-                regular, _ = inventory.regular_order(
+                regular = inventory.regular_order(
                     regular_deadline, lead, cycle, ordinary_multiplier, season.stock_at_season_end,
                 )
                 regular_qty = regular.quantity
