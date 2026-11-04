@@ -17,6 +17,7 @@ class SkuDemand:
     annual_level: float | None
     excluded_stockout_months: int
     low_data: bool
+    eligible_months: int
 
 
 def _season_window(monthly_totals: list[float], annual_total: float) -> tuple[int, ...]:
@@ -68,28 +69,30 @@ def estimate_sku_demand(
     history_months: tuple[date, ...],
     sales: dict[tuple[str, date], float],
     stock: dict[tuple[str, date], float],
+    first_sale: date | None,
 ) -> SkuDemand:
     quantities = []
     weights = []
+    excluded_months = 0
     for month in history_months:
         quantity = sales.get((sku, month), 0.0)
         if stock.get((sku, month), 0.0) != 0 or quantity != 0:
             quantities.append(quantity)
             weights.append(profile.weight_for(month.month))
+        elif first_sale is not None and month >= first_sale:
+            excluded_months += 1
 
-    excluded_months = len(history_months) - len(quantities)
     if not quantities:
-        return SkuDemand(None, excluded_months, False)
+        return SkuDemand(None, excluded_months, False, 0)
     exposure = sum(weights)
     if exposure == 0:
-        return SkuDemand(mean(quantities) * MONTHS_PER_YEAR, excluded_months, True)
-    return SkuDemand(sum(quantities) / exposure, excluded_months, False)
+        return SkuDemand(mean(quantities) * MONTHS_PER_YEAR, excluded_months, True, len(quantities))
+    return SkuDemand(sum(quantities) / exposure, excluded_months, False, len(quantities))
 
 
 def apply_analog_levels(
     sku_rows: list[dict[str, str]],
     own_demand: dict[str, SkuDemand],
-    history_length: int,
     skus_with_sales: set[str],
 ) -> dict[str, SkuDemand]:
     groups: dict[str, tuple[str, float]] = {}
@@ -110,8 +113,7 @@ def apply_analog_levels(
 
     demand = own_demand.copy()
     for sku, own in own_demand.items():
-        eligible_months = history_length - own.excluded_stockout_months
-        if eligible_months >= 3 or sku in skus_with_sales:
+        if own.eligible_months >= 3 or sku in skus_with_sales:
             continue
         sku_group = groups.get(sku)
         analog_levels = [] if sku_group is None else [

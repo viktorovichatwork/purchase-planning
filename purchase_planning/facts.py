@@ -1,5 +1,14 @@
 from dataclasses import dataclass
 from datetime import date
+from enum import StrEnum
+
+
+class Segment(StrEnum):
+    DEAD = "Мёртвые"
+    SLEEPING = "Спящие"
+    REVIEW = "На пересмотр"
+    CONDITIONAL = "Условно к закупке"
+    PURCHASE = "К закупке"
 
 
 @dataclass(frozen=True)
@@ -29,6 +38,11 @@ class Recommendation:
     stock_at_arrival: float | None = None
     in_transit_by_month: tuple[tuple[date, float], ...] = ()
     order_flags: tuple[str, ...] = ()
+    segment: Segment = Segment.PURCHASE
+    is_new: bool = False
+    markup_pct_12m: float | None = None
+    sales_qty_12m: float = 0.0
+    sku_flags: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)

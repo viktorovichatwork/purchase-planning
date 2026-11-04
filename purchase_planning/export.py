@@ -83,6 +83,8 @@ def read_export(data_dir: Path) -> dict[str, list[dict[str, str]]]:
         known_skus = {row["sku_id"] for row in tables["sku_dim"] if row["sku_id"].strip()}
         if any(not row["sku_id"].strip() for row in tables["sku_dim"]):
             reasons.append("sku_dim.csv: есть пустые sku_id.")
+        if len({row["sku_id"] for row in tables["sku_dim"]}) != len(tables["sku_dim"]):
+            reasons.append("sku_dim.csv: есть повторяющиеся sku_id.")
         for table in ("sales_monthly", "stock_monthly", "purchase_orders", "receipts"):
             unknown = {row["sku_id"] for row in tables.get(table, [])} - known_skus
             if unknown:

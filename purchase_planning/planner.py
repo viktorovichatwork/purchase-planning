@@ -1,6 +1,7 @@
 import json
 from calendar import monthrange
 from collections import defaultdict
+from collections.abc import Mapping
 from dataclasses import replace
 from datetime import date, timedelta
 from math import fsum
@@ -8,8 +9,9 @@ from pathlib import Path
 
 from purchase_planning.demand import apply_analog_levels, category_profiles, estimate_sku_demand
 from purchase_planning.export import ExportValidationError, finite_quantity, read_export
-from purchase_planning.facts import PlanFacts, Recommendation, SupplierSummary
+from purchase_planning.facts import PlanFacts, Recommendation, Segment, SupplierSummary
 from purchase_planning.inventory import forecast_period, project_stock
+from purchase_planning.segments import Sale, classify_sku, month_index
 from purchase_planning.supply import classify_transit, read_supply
 
 STOCK_HISTORY_START = date(2024, 1, 1)
@@ -56,26 +58,35 @@ def _read_cutoff(path: Path, complete_months: list[date]) -> tuple[date, str | N
     return cutoff, None
 
 
-def plan(data_dir: str | Path, as_of: date | None = None) -> PlanFacts:
+def plan(
+    data_dir: str | Path, as_of: date | None = None, *,
+    previous_segments: Mapping[str, Segment] | None = None,
+) -> PlanFacts:
     directory = Path(data_dir)
     tables = read_export(directory)
     reasons: list[str] = []
-    sales_rows: list[tuple[str, date, float]] = []
+    sales_rows: list[tuple[str, Sale]] = []
     partial_months: set[date] = set()
     for row in tables["sales_monthly"]:
         try:
             month_end = _month_end(row["month"])
             quantity = finite_quantity(row["qty_sold"])
+            returns = finite_quantity(row["qty_returned"].strip() or "0")
             if row["partial_month"] not in {"0", "1"}:
                 raise ValueError
         except ValueError:
             reasons.append(
                 f"sales_monthly.csv, SKU {row['sku_id']}: проверьте month (YYYY-MM), "
-                "qty_sold (число) и partial_month (0 или 1)."
+                "qty_sold и qty_returned (числа), partial_month (0 или 1)."
             )
             continue
-        sales_rows.append((row["sku_id"], month_end, quantity))
-        if row["partial_month"] == "1":
+        try:
+            markup = finite_quantity(row["markup_pct"])
+        except ValueError:
+            markup = None
+        partial = row["partial_month"] == "1"
+        sales_rows.append((row["sku_id"], Sale(month_end, quantity, returns, markup, partial)))
+        if partial:
             partial_months.add(month_end)
 
     stock: dict[tuple[str, date], float] = {}
@@ -91,7 +102,7 @@ def plan(data_dir: str | Path, as_of: date | None = None) -> PlanFacts:
 
     cutoff, warning = _read_cutoff(
         directory / "export_meta.json",
-        [month for _, month, _ in sales_rows if month not in partial_months],
+        [sale.month for _, sale in sales_rows if sale.month not in partial_months],
     )
     calculation_date = cutoff if as_of is None else as_of
     if calculation_date > cutoff:
@@ -105,30 +116,42 @@ def plan(data_dir: str | Path, as_of: date | None = None) -> PlanFacts:
     )
     sales: dict[tuple[str, date], float] = defaultdict(float)
     month_sales: dict[str, float] = defaultdict(float)
-    skus_with_sales = set()
-    for sku, month, quantity in sales_rows:
+    first_sales: dict[str, date] = {}
+    sales_by_sku: dict[str, list[Sale]] = defaultdict(list)
+    for sku, sale in sales_rows:
+        month, quantity = sale.month, sale.quantity
         if month <= calculation_date and month not in partial_months:
             sales[sku, month] += quantity
         if month == stock_month and know_month_sales:
             month_sales[sku] += quantity
         # A sale through the export cutoff is known even in an incomplete month.
-        if quantity > 0 and (month <= calculation_date or (calculation_date == cutoff and month == stock_month)):
-            skus_with_sales.add(sku)
+        if month <= calculation_date or (month == stock_month and know_month_sales):
+            sales_by_sku[sku].append(replace(sale, partial=True) if month in partial_months else sale)
+            if quantity > 0:
+                first_sales[sku] = min(first_sales.get(sku, month), month)
 
     sku_rows = tables["sku_dim"]
     sku_categories = {row["sku_id"]: row["category"] for row in sku_rows}
     profiles = category_profiles(sku_categories, sales)
     history_months = _complete_stock_months(calculation_date, partial_months)
     own_demand = {
-        sku: estimate_sku_demand(sku, profiles[category], history_months, sales, stock)
+        sku: estimate_sku_demand(sku, profiles[category], history_months, sales, stock, first_sales.get(sku))
         for sku, category in sku_categories.items()
     }
-    demand_by_sku = apply_analog_levels(sku_rows, own_demand, len(history_months), skus_with_sales)
+    demand_by_sku = apply_analog_levels(sku_rows, own_demand, set(first_sales))
 
     timing, receipts, open_lines = read_supply(tables, calculation_date, cutoff)
     transit, order_flags = classify_transit(open_lines, calculation_date)
     month_receipts: dict[str, dict[date, float]] = defaultdict(lambda: defaultdict(float))
+    current_month = month_index(calculation_date)
+    last_complete_month = current_month - (calculation_date < stock_month or stock_month in partial_months)
+    recent_stock = {
+        sku for (sku, month), quantity in stock.items()
+        if quantity > 0 and current_month - 12 < month_index(month) <= current_month
+    }
     for receipt in receipts:
+        if month_index(receipt.received) > current_month - 12:
+            recent_stock.add(receipt.sku)
         if month_start <= receipt.received:
             month_receipts[receipt.sku][receipt.received] += receipt.qty
 
@@ -156,6 +179,20 @@ def plan(data_dir: str | Path, as_of: date | None = None) -> PlanFacts:
             monthly_transit[day.replace(day=1)] += quantity
         supplier_timing = timing[supplier]
         lead, cycle = supplier_timing.lead_days, supplier_timing.cycle_days
+        assortment = classify_sku(
+            sales_by_sku[sku], first_sales.get(sku), as_of=calculation_date,
+            last_complete_month=last_complete_month, had_recent_stock=sku in recent_stock or current_stock > 0,
+            low_data=demand.low_data,
+            previous_segment=previous_segments.get(sku) if previous_segments is not None else None,
+        )
+        flags = list(assortment.flags)
+        unknown_supplier = not supplier or sku_row["supply_type"] == "unknown"
+        if unknown_supplier:
+            flags.append("Поставщик не указан")
+        if lead is None:
+            flags.append("Не определено плечо поставки")
+        if cycle is None:
+            flags.append("Нет истории для цикла")
         forecast = {}
         arrival: date | None = None
         arrival_stock: float | None = None
@@ -169,7 +206,9 @@ def plan(data_dir: str | Path, as_of: date | None = None) -> PlanFacts:
                 current_stock, arrivals, profile, annual_level,
                 start=forecast_start, end=horizon_end, snapshot_at=arrival + timedelta(days=1),
             )
-            if cycle is not None:
+            if cycle is not None and not unknown_supplier and assortment.segment in {
+                Segment.CONDITIONAL, Segment.PURCHASE,
+            }:
                 order_qty = shortage
         recommendation = Recommendation(
             sku_id=sku, supplier_id=supplier, order_qty=order_qty,
@@ -177,11 +216,15 @@ def plan(data_dir: str | Path, as_of: date | None = None) -> PlanFacts:
             stock_at_calculation=current_stock, arrival_date=arrival, stock_at_arrival=arrival_stock,
             in_transit_by_month=tuple(monthly_transit.items()),
             order_flags=tuple(sorted(order_flags.get(sku, set()))),
+            segment=assortment.segment, is_new=assortment.is_new,
+            markup_pct_12m=assortment.markup_pct_12m, sales_qty_12m=assortment.sales_qty_12m,
+            sku_flags=tuple(flags),
         )
         sku_plans.append((recommendation, forecast))
-        quantities_by_supplier[supplier].append(order_qty)
-        if order_qty > 0 and sku in skus_with_sales:
-            suppliers_due.add(supplier)
+        if assortment.segment == Segment.PURCHASE:
+            quantities_by_supplier[supplier].append(order_qty)
+            if order_qty > 0 and sku in first_sales:
+                suppliers_due.add(supplier)
 
     forecast_months = tuple(sorted({month for _, forecast in sku_plans for month in forecast}))
     suppliers = tuple(
