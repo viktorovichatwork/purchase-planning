@@ -13,7 +13,7 @@ from purchase_planning.order_sheet import (
     coverage_text, displayed_order_qty, excess_rows, order_date_label, rounded_quantity, stock_below_reorder_point,
     stockout_rows, supplier_orders,
 )
-from purchase_planning.parameters import PARAMETER_NUMBER_FORMATS, STALE_EXPORT_DAYS, run_parameters
+from purchase_planning.parameters import PARAMETER_NUMBER_FORMATS, STALE_EXPORT_DAYS, llm_max_skus, run_parameters
 from purchase_planning.replenishment import inventory_summary
 
 
@@ -176,7 +176,9 @@ def write_report(
     parameter_sheet.append(("Дата среза", facts.cutoff.isoformat()))
     parameter_sheet.append(("Дата расчёта", facts.as_of.isoformat()))
     parameter_sheet.append(("Дата запуска", run_date.isoformat()))
-    for name, value in (run_parameters() if parameters is None else parameters).items():
+    if parameters is None:
+        parameters = run_parameters() | {"LLM_MAX_SKUS": llm_max_skus()}
+    for name, value in parameters.items():
         parameter_sheet.append((name, value))
         if name in PARAMETER_NUMBER_FORMATS:
             parameter_sheet.cell(parameter_sheet.max_row, 2).number_format = PARAMETER_NUMBER_FORMATS[name]

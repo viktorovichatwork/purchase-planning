@@ -944,9 +944,12 @@ def test_long_lead_recommended_batch_does_not_become_excess(export):
     assert not after.excess
 
 
-def test_run_history_compares_the_same_export_and_preserves_parameters(export, tmp_path):
+def test_run_history_compares_the_same_export_and_preserves_parameters(export, tmp_path, monkeypatch):
     history = tmp_path / "runs"
+    monkeypatch.delenv("LLM_MAX_SKUS", raising=False)
     first = run_plan(export, history)
+    assert json.loads((first / "parameters.json").read_text(encoding="utf-8"))["LLM_MAX_SKUS"] == 300
+    monkeypatch.setenv("LLM_MAX_SKUS", "1")
     second = run_plan(export, history)
     assert first != second
     assert "Первый запуск" in (first / "index.html").read_text(encoding="utf-8")
@@ -963,6 +966,7 @@ def test_run_history_compares_the_same_export_and_preserves_parameters(export, t
         try:
             values = dict(list(workbook["Параметры"].values)[1:])
             assert values["Порог устаревания, дней"] == parameters["Порог устаревания, дней"] == 35
+            assert values["LLM_MAX_SKUS"] == parameters["LLM_MAX_SKUS"] == 1
             assert values["Выход из пересмотра, %"] == 30
         finally:
             workbook.close()

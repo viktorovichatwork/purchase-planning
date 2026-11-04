@@ -18,7 +18,7 @@ from purchase_planning.explanations import ExplanationStats, explain, gateway
 from purchase_planning.export import REQUIRED_COLUMNS, ExportValidationError
 from purchase_planning.facts import PlanFacts, Segment
 from purchase_planning.order_sheet import displayed_order_qty
-from purchase_planning.parameters import run_parameters
+from purchase_planning.parameters import llm_max_skus, run_parameters
 from purchase_planning.planner import calculate
 from purchase_planning.report import write_report
 
@@ -130,10 +130,16 @@ def run_plan(
     facts_data = asdict(facts)
     for saved, recommendation in zip(facts_data["recommendations"], facts.recommendations, strict=True):
         saved["rounded_order_qty"] = displayed_order_qty(recommendation)
-    changes = compare(
-        old_rows, list(facts_data["recommendations"]), _read_json(previous / "evidence.json"), evidence,
-        parameters_changed=_read_json(previous / "parameters.json") != parameters,
-    ) if previous else []
+    changes = []
+    if previous:
+        old_parameters = _read_json(previous / "parameters.json")
+        old_parameters.pop("LLM_MAX_SKUS", None)
+        changes = compare(
+            old_rows, list(facts_data["recommendations"]), _read_json(previous / "evidence.json"), evidence,
+            parameters_changed=old_parameters != parameters,
+        )
+    max_skus = llm_max_skus()
+    parameters["LLM_MAX_SKUS"] = max_skus
     sequence = int(previous.name) + 1 if previous else 1
     result = history / f"{sequence:06d}"
     # A failed write stays invisible to later runs. Concurrent runs cannot replace a published directory.
@@ -145,7 +151,7 @@ def run_plan(
         _write_json(staging / "evidence.json", evidence)
         _write_json(staging / "diff.json", {"previous_run": previous.name if previous else None, "changes": changes})
         write_report(facts, staging / "report.xlsx", run_date=run_date, parameters=parameters)
-        explanations, llm_stats = explain(facts, changes, gateway(stub=stub_llm))
+        explanations, llm_stats = explain(facts, changes, gateway(stub=stub_llm), max_skus=max_skus)
         _write_json(staging / "run.json", {
             "started_at": started_at.isoformat(), "run_date": run_date.isoformat(),
             "input_sha256": input_hash, "source_revision": source_revision, "code_revision": code_revision,

@@ -1,25 +1,30 @@
 import json
 from collections import defaultdict
 from collections.abc import Callable, Iterator, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from http.client import HTTPException
 from itertools import batched
 from math import fsum
 from os import getenv
-from time import monotonic
+from re import fullmatch
+from time import monotonic, sleep
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 from purchase_planning.comparison import DRIVER_LABELS, Change, count_changes
 from purchase_planning.facts import CategoryProfile, PlanFacts, Recommendation
 from purchase_planning.order_sheet import coverage_text, displayed_order_qty, rounded_quantity
+from purchase_planning.parameters import DEFAULT_LLM_MAX_SKUS
 from purchase_planning.wording import days_text
 
 DEFAULT_MODEL = "claude-sonnet-5"
 ENDPOINT = "https://api.experientiallabs.ai/v1/chat/completions"
 MAX_BATCH_SKUS = 40
 REQUEST_TIMEOUT_SECONDS = 150
-RUN_BUDGET_SECONDS = 15 * 60
+RUN_BUDGET_SECONDS = 10 * 60
+RETRY_DELAYS_SECONDS = (2, 4, 8, 16)
 
 REASON_LABELS = {
     "no_key": "нет ключа",
@@ -30,6 +35,7 @@ REASON_LABELS = {
     "timeout": "таймаут",
     "network": "ошибка сети",
     "time_budget": "исчерпано время на пояснения",
+    "llm_budget": "исчерпан бюджет LLM",
     "no_changes": "нет изменений для пояснения",
     "published": "опубликована",
 }
@@ -41,6 +47,12 @@ class Explanations:
     rows: dict[str, str]
 
 
+@dataclass(frozen=True)
+class RateLimitError:
+    code: str | None
+    type: str | None
+
+
 @dataclass
 class ExplanationStats:
     explained_skus: int = 0
@@ -49,6 +61,9 @@ class ExplanationStats:
     rejected_items: int = 0
     truncated_responses: int = 0
     summary_status: str = "no_changes"
+    first_invalid_response: str | None = None
+    http_429_errors: list[RateLimitError] = field(default_factory=list)
+    stop_reason: str | None = None
 
     def discard(self, count: int, reason: str) -> None:
         if count:
@@ -72,6 +87,7 @@ class ExplanationStats:
 class Reply:
     content: str | None = None
     failure: str | None = None
+    http_429_errors: tuple[RateLimitError, ...] = ()
 
 
 Completion = Callable[[dict[str, object], int], Reply]
@@ -153,7 +169,13 @@ def _requests[T](
     kind: str, entries: dict[str, T], complete: Completion, stats: ExplanationStats, *, split: bool = True,
 ) -> Iterator[tuple[dict[str, T], object, str | None]]:
     max_tokens = 512 + len(entries) * (512 if kind == "rows" else 192)
-    reply = complete({kind: entries}, max_tokens)
+    context = {kind: entries}
+    reply = complete(context, max_tokens)
+    for error in reply.http_429_errors:
+        if error not in stats.http_429_errors:
+            stats.http_429_errors.append(error)
+    if reply.failure in {"llm_budget", "time_budget"}:
+        stats.stop_reason = REASON_LABELS[reply.failure]
     if reply.failure == "truncated":
         stats.truncated_responses += 1
         if split and len(entries) > 1:
@@ -165,20 +187,38 @@ def _requests[T](
     if reply.failure is not None:
         yield entries, None, reply.failure
         return
+    content = reply.content or ""
+    first, last = content.find("{"), content.rfind("}")
+    candidate = content[first:last + 1] if 0 <= first <= last else content
     try:
-        result = json.loads(reply.content or "")
+        result = json.loads(candidate)
     except (ValueError, RecursionError):
+        if stats.first_invalid_response is None:
+            for ensure_ascii in (False, True):
+                for separators in (None, (",", ":")):
+                    serialized = json.dumps(context, ensure_ascii=ensure_ascii, separators=separators)
+                    content = content.replace(serialized, "[скрыто]")
+            key = getenv("EXPLABS_API_KEY")
+            if key:
+                content = content.replace(key, "[скрыто]")
+            stats.first_invalid_response = content[:300]
         yield entries, None, "invalid_json"
         return
     yield entries, result.get(kind) if isinstance(result, dict) else None, None
 
 
-def explain(facts: PlanFacts, changes: list[Change], complete: Completion) -> tuple[Explanations, ExplanationStats]:
+def explain(
+    facts: PlanFacts, changes: list[Change], complete: Completion, *, max_skus: int = DEFAULT_LLM_MAX_SKUS,
+) -> tuple[Explanations, ExplanationStats]:
     profiles = {profile.category: profile for profile in facts.category_profiles}
     lead_days = {row.supplier_id: row.timing.lead_days for row in facts.suppliers}
     by_supplier: dict[str, dict[str, dict[str, str]]] = defaultdict(dict)
+    ordered = sorted(
+        (row for row in facts.recommendations if row.order_qty > 0), key=displayed_order_qty, reverse=True,
+    )
+    selected = {row.sku_id for row in ordered[:max_skus]}
     for row in facts.recommendations:
-        if row.order_qty > 0:
+        if row.sku_id in selected:
             by_supplier[row.supplier_id][row.sku_id] = _row_clauses(
                 row, profiles.get(row.category), lead_days.get(row.supplier_id),
             )
@@ -203,6 +243,74 @@ def explain(facts: PlanFacts, changes: list[Change], complete: Completion) -> tu
     return Explanations(" ".join(headlines), explanations), stats
 
 
+def _send(request: Request, timeout: float) -> Reply:
+    try:
+        with urlopen(request, timeout=timeout) as response:
+            envelope = json.loads(response.read(2_000_000))
+        choice = envelope["choices"][0]
+        if choice["finish_reason"] == "length":
+            return Reply(failure="truncated")
+        content = choice["message"]["content"]
+        if choice["finish_reason"] == "stop" and isinstance(content, str):
+            return Reply(content=content)
+    except HTTPError:
+        raise
+    except TimeoutError:
+        return Reply(failure="timeout")
+    except URLError as error:
+        return Reply(failure="timeout" if isinstance(error.reason, TimeoutError) else "network")
+    except (OSError, HTTPException):
+        return Reply(failure="network")
+    except (ValueError, RecursionError):
+        return Reply(failure="invalid_json")
+    except (KeyError, TypeError, IndexError):
+        pass
+    return Reply(failure="validation")
+
+
+def _read_rate_limit(error: HTTPError, key: str) -> tuple[RateLimitError, bool]:
+    try:
+        raw = error.read(16_384).decode("utf-8", errors="replace")
+    except (OSError, HTTPException):
+        raw = ""
+    try:
+        body = json.loads(raw)
+    except (ValueError, RecursionError):
+        body = raw
+    details = body if isinstance(body, dict) else {"message": body}
+    if isinstance(details.get("error"), dict):
+        details = details["error"]
+
+    def identifier(name: str) -> str | None:
+        value = details.get(name)
+        if isinstance(value, str) and key not in value and fullmatch(r"[\w.:-]{1,100}", value):
+            return value
+        return None
+
+    diagnostic = RateLimitError(identifier("code"), identifier("type"))
+    tags = f"{details.get('code', '')} {details.get('type', '')}".lower()
+    message = str(details.get("message") or details.get("error") or "").lower().replace("_", " ")
+    exhausted = any(marker in tags for marker in (
+        "quota", "budget", "credit", "balance", "billing", "payment", "insufficient_funds", "out_of_funds",
+    )) or any(phrase in message for phrase in (
+        "insufficient quota", "exceeded your current quota", "budget exceeded", "insufficient credit",
+        "out of credit", "insufficient balance", "insufficient funds", "billing hard limit",
+    ))
+    return diagnostic, exhausted
+
+
+def _retry_delay(header: str | None, fallback: int) -> float:
+    if header:
+        try:
+            return max(0, int(header))
+        except ValueError:
+            try:
+                return max(0, (parsedate_to_datetime(header) - datetime.now(timezone.utc)).total_seconds())
+            except (ValueError, TypeError, OverflowError):
+                pass
+    return fallback
+
+
 def gateway(*, stub: bool = False) -> Completion:
     if stub:
         return lambda _context, _max_tokens: Reply(failure="stub")
@@ -211,11 +319,12 @@ def gateway(*, stub: bool = False) -> Completion:
         return lambda _context, _max_tokens: Reply(failure="no_key")
     model = getenv("EXPLABS_MODEL") or DEFAULT_MODEL
     deadline = monotonic() + RUN_BUDGET_SECONDS
+    stop_failure = None
 
     def complete(context: dict[str, object], max_tokens: int) -> Reply:
-        remaining = deadline - monotonic()
-        if remaining <= 0:
-            return Reply(failure="time_budget")
+        nonlocal stop_failure
+        if stop_failure:
+            return Reply(failure=stop_failure)
         if "summary" in context:
             task = (
                 'Выбери главные изменения и наблюдаемые причины. '
@@ -230,6 +339,7 @@ def gateway(*, stub: bool = False) -> Completion:
         body = {
             "model": model,
             "max_tokens": max_tokens,
+            "response_format": {"type": "json_object"},
             "messages": [
                 {"role": "system", "content": task + (
                     ' Верни только JSON. Копируй текст выбранных фраз дословно и используй коды и SKU из входа. '
@@ -242,28 +352,39 @@ def gateway(*, stub: bool = False) -> Completion:
             "Authorization": f"Bearer {key}",
             "Content-Type": "application/json",
         }, method="POST")
-        try:
-            with urlopen(request, timeout=min(REQUEST_TIMEOUT_SECONDS, remaining)) as response:
-                envelope = json.loads(response.read(2_000_000))
-            choice = envelope["choices"][0]
-            if choice["finish_reason"] == "length":
-                return Reply(failure="truncated")
-            content = choice["message"]["content"]
-            if choice["finish_reason"] == "stop" and isinstance(content, str):
-                return Reply(content=content)
-        except HTTPError as error:
-            error.close()
-            return Reply(failure=f"http_{error.code}")
-        except TimeoutError:
-            return Reply(failure="timeout")
-        except URLError as error:
-            return Reply(failure="timeout" if isinstance(error.reason, TimeoutError) else "network")
-        except (OSError, HTTPException):
-            return Reply(failure="network")
-        except (ValueError, RecursionError):
-            return Reply(failure="invalid_json")
-        except (KeyError, TypeError, IndexError):
-            pass
-        return Reply(failure="validation")
+        errors = []
+        for fallback in (*RETRY_DELAYS_SECONDS, None):
+            remaining = deadline - monotonic()
+            if remaining <= 0:
+                stop_failure = "time_budget"
+                break
+            try:
+                reply = _send(request, min(REQUEST_TIMEOUT_SECONDS, remaining))
+            except HTTPError as error:
+                with error:
+                    if error.code != 429:
+                        reply = Reply(failure=f"http_{error.code}")
+                        break
+                    diagnostic, exhausted = _read_rate_limit(error, key)
+                    errors.append(diagnostic)
+                    retry_after = error.headers.get("Retry-After") if error.headers else None
+                if exhausted:
+                    stop_failure = "llm_budget"
+                    break
+                if fallback is None:
+                    reply = Reply(failure="http_429")
+                    break
+                delay = _retry_delay(retry_after, fallback)
+                if delay >= deadline - monotonic():
+                    stop_failure = "time_budget"
+                    break
+                sleep(delay)
+            else:
+                break
+        if stop_failure is None and monotonic() >= deadline:
+            stop_failure = "time_budget"
+        if stop_failure:
+            reply = Reply(failure=stop_failure)
+        return replace(reply, http_429_errors=tuple(errors))
 
     return complete
