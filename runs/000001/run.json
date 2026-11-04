@@ -1,0 +1,19 @@
+{
+  "code_revision": "da136f2b3773a8dcf6f4cd729de8849af6a495df",
+  "input_sha256": "293de7dff542ecaeca16b4b037caacdeeb80f1ec10cae95e2fa2b353514caff1",
+  "llm": {
+    "discarded_by_reason": {
+      "http_429": 127,
+      "invalid_json": 149
+    },
+    "discarded_skus": 276,
+    "explained_skus": 1,
+    "rejected_items": 0,
+    "summary_status": "no_changes",
+    "truncated_responses": 0
+  },
+  "run_date": "2026-11-04",
+  "source_revision": "da136f2b3773a8dcf6f4cd729de8849af6a495df",
+  "started_at": "2026-11-04T11:01:11.623134+00:00",
+  "workflow_run": "41818029714"
+}
