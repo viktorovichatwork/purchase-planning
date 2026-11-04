@@ -69,7 +69,7 @@ def test_forecast_starts_after_cutoff_and_uses_actual_sales_and_receipts_through
 
 @pytest.mark.parametrize(
     ("count", "lead", "source"),
-    [(4, 205, "Заказы + 20 дней"), (5, 210, "История заказов + p75")],
+    [(4, 200, "Вся история заказов + 20 дней"), (5, 210, "История заказов + p75")],
 )
 def test_supplier_timing_counts_batches_and_does_not_cap_lead(export, count, lead, source):
     orders = export / "purchase_orders.csv"
@@ -92,6 +92,53 @@ def test_supplier_timing_counts_batches_and_does_not_cap_lead(export, count, lea
 
     timing = plan(export).suppliers[0].timing
     assert (timing.lead_days, timing.lead_source, timing.cycle_days) == (lead, source, 31)
+
+
+def test_sparse_recent_history_uses_all_planned_lead_days(export):
+    orders = export / "purchase_orders.csv"
+    header = orders.read_text(encoding="utf-8").splitlines()[0]
+    orders.write_text(
+        header + "\n"
+        "PO-1,SKU-1,SUP-1,import,2024-01-01,2024-02-01,120,closed,10,0,0,10\n"
+        "PO-2,SKU-1,SUP-1,import,2024-06-01,2024-07-01,150,closed,10,0,0,10\n"
+        "PO-3,SKU-1,SUP-1,import,2025-01-01,2025-01-07,6,closed,10,0,0,10\n",
+        encoding="utf-8",
+    )
+
+    timing = plan(export).suppliers[0].timing
+    assert (timing.lead_days, timing.lead_source) == (140, "Вся история заказов + 20 дней")
+
+
+@pytest.mark.parametrize(
+    ("supply_type", "planned_days", "lead", "source"),
+    [
+        ("import", "0", 20, "Вся история заказов + 20 дней · проверить плечо"),
+        ("import", "10", 30, "Вся история заказов + 20 дней"),
+        ("local", "0", 20, "Вся история заказов + 20 дней"),
+        ("import", "", 20, "Справочник + 20 дней · проверить плечо"),
+    ],
+)
+def test_short_import_lead_is_flagged_in_source_column(export, supply_type, planned_days, lead, source):
+    orders = export / "purchase_orders.csv"
+    orders.write_text(
+        orders.read_text(encoding="utf-8").replace(",181,completed", f",{planned_days},completed"),
+        encoding="utf-8",
+    )
+    suppliers = export / "supplier_dim.csv"
+    suppliers.write_text(
+        suppliers.read_text(encoding="utf-8").replace(",import,1,1,,181", f",{supply_type},1,1,,0"),
+        encoding="utf-8",
+    )
+
+    path = export / "order.xlsx"
+    write_report(plan(export), path)
+    workbook = load_workbook(path)
+    try:
+        header, row, _ = list(workbook["Заказ по поставщикам"].values)[-3:]
+        assert row[header.index("Плечо, дней")] == lead
+        assert row[header.index("Источник плеча")] == source
+    finally:
+        workbook.close()
 
 
 def test_open_orders_respect_arrival_and_overdue_boundaries(export):
@@ -152,7 +199,7 @@ def test_export_to_order_sheet(export):
         )
         assert values[:2] == (row.supplier_id, row.sku_id)
         assert values[2:13] == pytest.approx((row.order_qty, 29, *row.monthly_forecast))
-        assert values[14:17] == (201, "Заказы + 20 дней", 30)
+        assert values[14:17] == (201, "Вся история заказов + 20 дней", 30)
         assert total[:2] == ("SUP-1", "Итого")
         assert total[2] == pytest.approx(row.order_qty)
         assert total[header.index("Пора заказывать у поставщика")] == "Да"

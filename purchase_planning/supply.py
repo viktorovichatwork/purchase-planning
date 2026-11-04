@@ -10,6 +10,7 @@ from purchase_planning.facts import SupplierTiming
 LEAD_HISTORY_START = date(2025, 1, 1)
 MIN_ORDERS = 5
 DEFAULT_DELAY_DAYS = 20
+MIN_IMPORT_LEAD_DAYS = 30
 MAX_TRANSIT_OVERDUE_DAYS = 30
 
 
@@ -20,6 +21,7 @@ class PurchaseLine:
     supplier: str
     placed: date
     promised: date | None
+    planned_lead_days: float | None
     status: str
     ordered: float
     received: float
@@ -42,15 +44,17 @@ def _purchase_line(row: dict[str, str]) -> PurchaseLine:
     try:
         placed = date.fromisoformat(row["order_date"])
         promised = date.fromisoformat(row["promised_date"]) if row["promised_date"] else None
+        planned = row["planned_lead_days"]
+        planned_lead_days = finite_quantity(planned) if planned else None
         ordered = finite_quantity(row["qty_ordered"])
         received = finite_quantity(row["qty_received"])
         pending = finite_quantity(row["qty_pending"])
     except ValueError:
         raise ExportValidationError([
-            f"purchase_orders.csv, SKU {row['sku_id']}: проверьте даты и количества заказа."
+            f"purchase_orders.csv, SKU {row['sku_id']}: проверьте даты, плановый срок и количества заказа."
         ]) from None
     return PurchaseLine(
-        row["po_id"], row["sku_id"], row["supplier_id"], placed, promised,
+        row["po_id"], row["sku_id"], row["supplier_id"], placed, promised, planned_lead_days,
         row["status"], ordered, received, pending,
     )
 
@@ -97,13 +101,15 @@ def _median_interval(dates: set[date]) -> int | None:
 
 
 def _supplier_timing(
-    orders: list[PurchaseLine], receipts: list[Receipt], supplier_row: dict[str, str],
+    orders: list[PurchaseLine], receipts: list[Receipt], supplier_row: dict[str, str], *, use_summary: bool,
 ) -> SupplierTiming:
     promises: dict[str | tuple[date, date | None], list[int]] = defaultdict(list)
     delays: dict[str | tuple[date, date | None], int] = {}
-    matched = _matched_receipt_dates(orders, receipts)
-    for line in orders:
-        if line.placed < LEAD_HISTORY_START or line.promised is None or line.promised < line.placed:
+    recent = [line for line in orders if line.placed >= LEAD_HISTORY_START]
+    enough_recent_batches = len({line.batch for line in recent}) >= MIN_ORDERS
+    matched = _matched_receipt_dates(orders, receipts) if enough_recent_batches else {}
+    for line in recent:
+        if line.promised is None or line.promised < line.placed:
             continue
         promises[line.batch].append((line.promised - line.placed).days)
         if line in matched:
@@ -111,35 +117,49 @@ def _supplier_timing(
             delays[line.batch] = max(delays.get(line.batch, 0), delay)
 
     flags = []
-    promised_days: float | None
-    if promises:
+    lead_days: int | None
+    if enough_recent_batches and delays:
         promised_days = median(median(days) for days in promises.values())
-    else:
-        summary_value = supplier_row.get("median_planned_lead_days", "")
-        try:
-            promised_days = finite_quantity(summary_value) if summary_value else None
-        except ValueError:
-            raise ExportValidationError([
-                "supplier_dim.csv: проверьте median_planned_lead_days для "
-                f"{supplier_row['supplier_id']}."
-            ]) from None
-        if promised_days is not None and promised_days < 0:
-            promised_days = None
-
-    if promised_days is None:
-        lead_days, source = None, "Нет данных"
-        flags.append("Нет обещанного срока")
-    elif len(promises) >= MIN_ORDERS and delays:
         observations = list(delays.values())
         p75 = quantiles(observations, n=4, method="inclusive")[2] if len(observations) > 1 else observations[0]
         lead_days, source = ceil(promised_days + p75), "История заказов + p75"
         if len(delays) < len(promises):
             flags.append("Опоздание оценено по доступным приходам")
     else:
-        lead_days = ceil(promised_days + DEFAULT_DELAY_DAYS)
-        source = "Заказы + 20 дней" if promises else "Справочник + 20 дней"
-        if len(promises) >= MIN_ORDERS:
+        planned_days = [line.planned_lead_days for line in orders if line.planned_lead_days is not None]
+        fallback_days: float | None
+        if enough_recent_batches and promises:
+            fallback_days = median(median(days) for days in promises.values())
+            source = "Заказы + 20 дней"
+        elif planned_days:
+            fallback_days = median(planned_days)
+            source = "Вся история заказов + 20 дней"
+        else:
+            summary_value = supplier_row.get("median_planned_lead_days", "") if use_summary else ""
+            try:
+                fallback_days = finite_quantity(summary_value) if summary_value else None
+            except ValueError:
+                raise ExportValidationError([
+                    "supplier_dim.csv: проверьте median_planned_lead_days для "
+                    f"{supplier_row['supplier_id']}."
+                ]) from None
+            if fallback_days is not None and fallback_days < 0:
+                fallback_days = None
+            source = "Справочник + 20 дней"
+
+        if fallback_days is None:
+            lead_days, source = None, "Нет данных"
+            flags.append("Нет обещанного срока")
+        elif fallback_days + DEFAULT_DELAY_DAYS < 0:
+            lead_days = None
+            flags.append("Отрицательная оценка плеча")
+        else:
+            lead_days = ceil(fallback_days + DEFAULT_DELAY_DAYS)
+        if enough_recent_batches:
             flags.append("Нет сопоставимых приходов для p75")
+
+    if lead_days is not None and lead_days < MIN_IMPORT_LEAD_DAYS and supplier_row.get("supply_type") == "import":
+        source += " · проверить плечо"
 
     cycle = _median_interval({line.placed for line in orders})
     if cycle is None:
@@ -164,9 +184,12 @@ def read_supply(
             receipts_by_supplier[receipt.supplier].append(receipt)
 
     # Supplier summary fields and PO status/quantities are snapshots at the export cutoff.
-    supplier_rows = {row["supplier_id"]: row for row in tables["supplier_dim"]} if as_of == cutoff else {}
+    supplier_rows = {row["supplier_id"]: row for row in tables["supplier_dim"]}
     timing = {
-        supplier: _supplier_timing(orders_by_supplier[supplier], receipts_by_supplier[supplier], supplier_rows.get(supplier, {}))
+        supplier: _supplier_timing(
+            orders_by_supplier[supplier], receipts_by_supplier[supplier], supplier_rows.get(supplier, {}),
+            use_summary=as_of == cutoff,
+        )
         for supplier in sorted({row["supplier_id"] for row in tables["sku_dim"]})
     }
     receipts = [receipt for group in receipts_by_supplier.values() for receipt in group]
