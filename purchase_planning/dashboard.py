@@ -9,13 +9,14 @@ from pathlib import Path
 from purchase_planning.comparison import Change, summarize
 from purchase_planning.explanations import Explanations
 from purchase_planning.export import REQUIRED_COLUMNS
-from purchase_planning.facts import OrderFlag, PlanFacts, Recommendation, Segment
+from purchase_planning.facts import OrderFlag, PlanFacts, Recommendation, SeasonStatus, Segment
 from purchase_planning.order_sheet import (
     coverage_text, displayed_order_qty, excess_rows, order_date_label, rounded_quantity, stock_below_reorder_point,
     stockout_rows, supplier_orders,
 )
 from purchase_planning.parameters import STALE_EXPORT_DAYS, STALE_EXPORT_STATUS
 from purchase_planning.replenishment import inventory_summary
+from purchase_planning.segments import PURCHASE_MARKUP_PCT
 from purchase_planning.sku_labels import category_name
 from purchase_planning.wording import days_text
 
@@ -60,7 +61,7 @@ function setupList(list) {
     const status = pager.querySelector("[role='status']");
     const prev = pager.querySelector("[data-prev]");
     const next = pager.querySelector("[data-next]");
-    const items = Array.from(entries.children, (node) => ({
+    const items = Array.from(entries.querySelectorAll(":scope > [data-search], :scope > section > ul > [data-search]"), (node) => ({
         node,
         text: normalize(node.dataset.search),
         child: node.querySelector(":scope > [data-browse]"),
@@ -152,12 +153,16 @@ function showView() {
     return target;
 }
 
-for (const link of links) {
+for (const link of [...links, ...document.querySelectorAll("[data-view-link]")]) {
     link.addEventListener("click", (event) => {
         if (event.ctrlKey || event.metaKey || event.altKey || event.shiftKey) return;
         event.preventDefault();
         if (location.hash !== link.hash) history.pushState(null, "", link.hash);
-        showView();
+        const target = showView();
+        if (link.hasAttribute("data-view-link") && target) {
+            target.focus({preventScroll: true});
+            target.scrollIntoView();
+        }
     });
 }
 window.addEventListener("hashchange", () => showView()?.scrollIntoView());
@@ -172,6 +177,7 @@ class Batch:
     quantity: int
     seasonal: bool
     low_stock: bool
+    conditional: bool
 
 
 @dataclass(frozen=True)
@@ -194,17 +200,18 @@ def _supplier_schedules(facts: PlanFacts) -> list[SupplierSchedule]:
         batches = []
         for row in lines:
             low_stock = stock_below_reorder_point(row)
+            conditional = row.segment == Segment.CONDITIONAL
             season = row.seasonal_order
             seasonal_qty = 0
             if season and season.actionable:
                 seasonal_qty = rounded_quantity(season.order_qty, row.order_multiple)
-                batches.append(Batch(season.deadline, seasonal_qty, True, low_stock))
+                batches.append(Batch(season.deadline, seasonal_qty, True, low_stock, conditional))
             ordinary_qty = displayed_order_qty(row) - seasonal_qty
             if ordinary_qty > 0:
                 placement = row.order_by if row.grouped_season_deadline else row.regular_order_date
                 if row.regular_order_qty is None:
                     placement = placement or row.order_by or (summary.next_order_date if summary else None)
-                batches.append(Batch(placement or facts.as_of, ordinary_qty, False, low_stock))
+                batches.append(Batch(placement or facts.as_of, ordinary_qty, False, low_stock, conditional))
         schedules.append(SupplierSchedule(supplier, lines, batches, summary.timing.flags if summary else ()))
     return sorted(schedules, key=lambda row: (row.deadline, row.supplier_id))
 
@@ -266,6 +273,21 @@ def _table(
     return _browse(table, "Поиск по SKU, категории, бренду или поставщику") if sku_labels is not None else table
 
 
+def _confirmation_reason(row: Recommendation) -> str:
+    reasons = []
+    if row.low_data:
+        reasons.append("Мало данных для прогноза")
+    if "Мало данных о наценке" in row.sku_flags:
+        reasons.append("Мало данных о наценке")
+    if row.markup_pct_12m is not None and row.markup_pct_12m < PURCHASE_MARKUP_PCT:
+        reasons.append(f"Наценка ниже {PURCHASE_MARKUP_PCT}%")
+    if row.seasonal_order and row.seasonal_order.status == SeasonStatus.LATE:
+        reasons.append("Поздний заказ")
+    if row.seasonal_order and row.seasonal_order.status == SeasonStatus.NOT_RECOMMENDED:
+        reasons.append("Сезонная партия не рекомендована")
+    return " · ".join(reasons) or "Проверьте рекомендацию перед размещением заказа."
+
+
 def _sku(
     row: Recommendation, facts: PlanFacts, explanation: str, supplier_flags: tuple[str, ...],
     labels: Mapping[str, str],
@@ -288,11 +310,15 @@ def _sku(
     why = f"<p><strong>Пояснение LLM</strong> · {escape(explanation)}</p>" if explanation else ""
     sku = escape(row.sku_id)
     search = _search_key(row.sku_id, labels.get(row.sku_id, ""))
+    reason = (
+        f'<small class="confirmation-reason">{escape(_confirmation_reason(row))}</small>'
+        if row.segment == Segment.CONDITIONAL else ""
+    )
     return (
         f'<li data-search="{search}"><details class="sku-detail"><summary>'
         f'<span class="sku-heading"><strong>{sku}</strong>'
         f'<span>{displayed_order_qty(row)} шт. к заказу</span></span>{_sku_caption(row.sku_id, labels)}'
-        f'</summary><dl>{fields_html}</dl>{why}</details></li>'
+        f'{reason}</summary><dl>{fields_html}</dl>{why}</details></li>'
     )
 
 
@@ -306,15 +332,26 @@ def _order_table(
         when = order_date_label(schedule.deadline, as_of, date_format="%d.%m.%Y", below_reorder_point=low_stock)
         name = escape(schedule.supplier_id or "Поставщик не указан")
         batch_lines = []
-        for seasonal, label in ((False, "Обычная партия"), (True, "Сезонная партия")):
-            batches = [batch for batch in schedule.batches if batch.seasonal == seasonal]
-            if batches:
-                deadline = min(batch.deadline for batch in batches)
-                batch_date = f"до {_date(deadline)}" if seasonal else order_date_label(deadline, as_of, date_format="%d.%m.%Y")
-                quantity = sum(batch.quantity for batch in batches)
-                batch_lines.append(f'<span class="batch">{label} — {batch_date} — {quantity} шт.</span>')
-        skus = "".join(_sku(row, facts, explanations.get(row.sku_id, ""), schedule.flags, labels) for row in schedule.lines)
-        entries = _browse(f'<ul class="skus" data-entries="">{skus}</ul>')
+        quantities = Counter()
+        for batch in schedule.batches:
+            quantities[batch.seasonal, batch.deadline] += batch.quantity
+        for (seasonal, deadline), quantity in sorted(quantities.items()):
+            label = "Сезонная партия" if seasonal else "Обычная партия"
+            batch_date = f"до {_date(deadline)}" if seasonal else _date(deadline)
+            if not seasonal and deadline <= as_of:
+                batch_date = f"Сейчас · срок {batch_date}"
+            batch_lines.append(f'<span class="batch">{label} — {batch_date} — {quantity} шт.</span>')
+        ordinary, conditional = [], []
+        for row in schedule.lines:
+            target = conditional if row.segment == Segment.CONDITIONAL else ordinary
+            target.append(_sku(row, facts, explanations.get(row.sku_id, ""), schedule.flags, labels))
+        sku_groups = f'<section><ul class="skus">{"".join(ordinary)}</ul></section>' if ordinary else ""
+        if conditional:
+            sku_groups += (
+                '<section class="confirmation"><h3>Требуют подтверждения</h3>'
+                f'<ul class="skus">{"".join(conditional)}</ul></section>'
+            )
+        entries = _browse(f'<div class="sku-groups" data-entries="">{sku_groups}</div>')
         rows.append(
             f'<details data-search="{name}"><summary><strong>{name}</strong> <span>Когда заказать — {when}</span>'
             f'{"".join(batch_lines)}</summary>{entries}</details>'
@@ -329,7 +366,7 @@ def _order_table(
 
 def _decision(
     facts: PlanFacts, schedules: list[SupplierSchedule], previous_run: str | None, changes: list[Change],
-    explanation: str,
+    explanation: str, *, stale: bool,
 ) -> str:
     as_of = facts.as_of
     due = sum(schedule.deadline <= as_of for schedule in schedules)
@@ -338,29 +375,34 @@ def _decision(
         for schedule in schedules
     )
     batches = [batch for schedule in schedules for batch in schedule.batches]
-    units_now = sum(batch.quantity for batch in batches if batch.deadline <= as_of)
+    due_batches = [batch for batch in batches if batch.deadline <= as_of]
+    units_now = sum(batch.quantity for batch in due_batches if not batch.conditional)
+    units_to_confirm = sum(batch.quantity for batch in due_batches if batch.conditional)
     seasonal_units = sum(
         batch.quantity for batch in batches if batch.seasonal and as_of <= batch.deadline <= as_of + timedelta(days=90)
     )
     excess = excess_rows(facts)
     volume = round(fsum(max(0, row.stock_at_calculation + row.in_transit - (row.excess_threshold or 0)) for row in excess))
     metrics = (
-        ("Поставщиков пора заказывать", due),
-        ("К заказу сейчас, шт.", units_now),
-        ("SKU в риске дефицита", len(stockout_rows(facts))),
+        ("Поставщиков пора заказывать", due, "#orders"),
+        ("Рекомендация на дату среза, шт." if stale else "К заказу сейчас, шт.", units_now, ""),
+        ("Требуют подтверждения, шт.", units_to_confirm, ""),
+        ("SKU в риске дефицита", len(stockout_rows(facts)), "#risks"),
     )
     additional = (
-        ("Поставщиков в следующие 30 дней", soon),
-        ("Сезонные партии с крайним сроком в ближайшие 90 дней, шт.", seasonal_units),
-        ("Избыток, шт. сверх порога", volume),
+        ("Поставщиков в следующие 30 дней", soon, ""),
+        ("Сезонные партии с крайним сроком в ближайшие 90 дней, шт.", seasonal_units, ""),
+        ("Избыток, шт. сверх порога", volume, ""),
     )
 
-    def metrics_list(values: tuple[tuple[str, int], ...]) -> str:
-        items = "".join(
-            f"<div><dt>{label}</dt><dd>{format(value, ',').replace(',', ' ')}</dd></div>"
-            for label, value in values
-        )
-        return f'<dl class="decision">{items}</dl>'
+    def metrics_list(values: tuple[tuple[str, int, str], ...]) -> str:
+        items = []
+        for label, value, href in values:
+            number = format(value, ",").replace(",", " ")
+            if href:
+                number = f'<a href="{href}" data-view-link="" aria-label="{label} — {number}">{number}</a>'
+            items.append(f"<div><dt>{label}</dt><dd>{number}</dd></div>")
+        return f'<dl class="decision">{"".join(items)}</dl>'
 
     comparison = escape(" ".join(summarize(previous_run, changes).splitlines()))
     llm = f"<p><strong>Пояснение LLM</strong> · {escape(explanation)}</p>" if explanation else ""
@@ -526,7 +568,7 @@ def write_dashboard(
     )
     schedules = _supplier_schedules(facts)
     labels = sku_labels or {}
-    overview = _decision(facts, schedules, previous_run, changes, explanations.summary if explanations else "")
+    overview = _decision(facts, schedules, previous_run, changes, explanations.summary if explanations else "", stale=stale)
     workspace = (
         ("orders", "Заказ по поставщикам", _order_table(facts, schedules, explanations.rows if explanations else {}, labels)),
         ("risks", "Риски дефицита", _risks(facts, labels)),
@@ -542,16 +584,22 @@ def write_dashboard(
     )
     nav = "".join(f'<a href="#{key}">{"Поставщики" if key == "orders" else title}</a>' for key, title, _ in workspace)
     content = "\n".join(
-        f'<section id="{key}" data-view=""><h2>{title}</h2>{body}</section>' for key, title, body in workspace
+        f'<section id="{key}" data-view="" tabindex="-1"><h2>{title}</h2>{body}</section>' for key, title, body in workspace
     )
     diagnostic_html = "\n".join(
         f'<section id="{key}"><h3>{title}</h3>{body}</section>' for key, title, body in diagnostics
     )
     history_link = '<a href="history.html">История запусков</a>' if previous_run else ""
     upload_link = '<a class="upload-action" href="#upload">Обновить выгрузку ERP</a>'
-    stale_note = (
-        f'<span>Перед размещением заказа обновите данные.</span>{upload_link}' if stale else ""
-    )
+    freshness = f'<div class="freshness {status_class}"><strong>{status}</strong>'
+    if stale:
+        freshness += (
+            '<span>Перед размещением заказа обновите данные.</span>'
+            '<a class="upload-action primary" href="#upload">Обновить выгрузку ERP</a>'
+        )
+    freshness += '</div>'
+    check_orders = '<a class="primary" href="#orders" data-view-link="">Проверить заказ по поставщикам</a>'
+    download_label = "Скачать черновик XLSX" if stale else "Скачать XLSX"
     csv_files = ", ".join(f"<code>{table}.csv</code>" for table in REQUIRED_COLUMNS)
     path.write_text(
         f"""<!doctype html>
@@ -602,17 +650,14 @@ p:not(.empty) {{ max-width: 75ch; }}
 .draft {{ background: var(--draft-bg); color: var(--draft); }}
 .draft a {{ color: inherit; font-weight: 650; }}
 .upload-action {{ display: inline-flex; align-items: center; min-height: 44px; }}
-.freshness .upload-action {{
-    padding: 0 .75rem; border: 1px solid currentColor; border-radius: .4rem; text-decoration: none;
-}}
-.freshness .upload-action:hover {{ text-decoration: underline; }}
 .current {{ color: var(--accent); background: var(--subtle); }}
 a {{ color: var(--accent); text-underline-offset: .2em; }}
 .actions {{ display: flex; align-items: center; flex-wrap: wrap; gap: .25rem 1rem; }}
 .actions a, .workspace-nav a {{ display: inline-flex; align-items: center; min-height: 44px; }}
-.download {{ border-radius: .4rem; padding: 0 .9rem; background: var(--accent); color: var(--surface); font-weight: 650; text-decoration: none; }}
-.download:hover {{ text-decoration: underline; }}
-.decision {{ display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 0 1.25rem; margin: .5rem 0; }}
+.primary {{ border-radius: .4rem; padding: 0 .9rem; background: var(--accent); color: var(--surface); font-weight: 650; text-decoration: none; }}
+.draft .primary {{ background: var(--draft); color: var(--draft-bg); }}
+.primary:hover {{ text-decoration: underline; }}
+.decision {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(min(8rem, 100%), 1fr)); gap: 0 1.25rem; margin: .5rem 0; }}
 .decision div {{ border-top: 1px solid var(--line); padding: .5rem 0; display: flex; flex-direction: column-reverse; justify-content: start; }}
 .decision dt {{ color: var(--muted); font-size: .875rem; }}
 .decision dd {{ font-size: 1.45rem; font-weight: 700; line-height: 1.2; font-variant-numeric: tabular-nums; }}
@@ -629,6 +674,10 @@ details {{ border-bottom: 1px solid var(--line); }}
 summary {{ padding: .7rem .25rem; cursor: pointer; overflow-wrap: anywhere; }}
 .batch {{ display: block; margin-left: 1rem; }}
 .skus {{ padding: 0; list-style: none; }}
+.sku-groups section {{ margin: 0; }}
+.sku-groups section:not(:has(li:not([hidden]))) {{ display: none; }}
+.confirmation h3 {{ margin: .75rem .75rem 0; }}
+.confirmation-reason {{ display: block; color: var(--muted); }}
 .skus li {{ overflow-wrap: anywhere; }}
 .sku-detail summary {{ padding-inline: .75rem; }}
 .sku-heading {{ display: inline-flex; flex-wrap: wrap; gap: 0 .75rem; }}
@@ -699,13 +748,15 @@ ul {{ margin: 0; padding-left: 1.25rem; }}
 <h1>План закупок</h1>
 <p class="meta">Срез <time datetime="{facts.cutoff.isoformat()}">{facts.cutoff:%d.%m.%Y}</time>{cutoff_note} · {days_text(age)} на дату запуска</p>
 </div>
+{freshness if stale else ""}
 <nav class="actions" aria-label="Действия с отчётом">
-<a class="download" href="report.xlsx" download="report.xlsx">Скачать XLSX</a>
+{check_orders if not stale else ""}
+<a href="report.xlsx" download="report.xlsx">{download_label}</a>
 {history_link}
 {upload_link if not stale else ""}
 <a href="#guide">Как работать с порталом</a>
 </nav>
-<div class="freshness {status_class}"><strong>{status}</strong>{stale_note}</div>
+{freshness if not stale else ""}
 {warnings}
 </header>
 <section id="overview"><h2>Сводка решения</h2>{overview}</section>
