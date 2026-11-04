@@ -32,7 +32,7 @@ def test_dashboard_matches_workbook_and_displays_facts(tmp_path):
     write_dashboard(facts, dashboard, run_date=run_date, previous_run=None, changes=[])
 
     page = ElementTree.fromstring(dashboard.read_text(encoding="utf-8").split("\n", 1)[1])
-    suppliers = page.findall(".//section[@id='orders']/details/summary")
+    suppliers = page.findall(".//section[@id='orders']/div/div/details/summary")
     workbook = load_workbook(report)
     try:
         totals = [(row[0], row[3]) for row in workbook.active.values if row[1] == "Итого"]
@@ -43,8 +43,8 @@ def test_dashboard_matches_workbook_and_displays_facts(tmp_path):
     assert [row[1].text for row in suppliers] == [
         "Когда заказать — Сейчас · запас ниже точки заказа", "Когда заказать — 01.10.2026",
     ]
-    assert len(page.findall(".//details/ul/li")) == 3
-    assert page.findall(".//details/ul/li/dl/dt")[0].text == "К заказу, шт."
+    assert len(page.findall(".//section[@id='orders']//ul/li")) == 3
+    assert page.findall(".//details[@class='sku-detail']/dl/dt")[0].text == "К заказу, шт."
     assert page.find(".//a").attrib["href"] == "report.xlsx"
     visible_text = "".join(page.itertext())
     assert page.find(".//a[@href='#guide']") is not None
@@ -80,13 +80,13 @@ def test_risk_table_uses_workbook_order_and_hides_losses_below_one(tmp_path):
         expected = [("SKU-2", 3), ("SKU-1", 1), ("SKU-3", 1), ("SKU-4", 10)]
         assert [(row[0], row[-1]) for row in list(workbook["Риски дефицита"].values)[1:]] == expected
         rows = page.findall(".//div[@aria-label='Риски дефицита']/table/tbody/tr")
-        assert [(row[0].text, int(row[-1].text)) for row in rows] == [*expected[:2], expected[-1]]
+        assert [(row[0].text, int(row[1].text)) for row in rows] == [*expected[:2], expected[-1]]
         assert workbook["Избыток"]["G2"].value == "> 12,3"
         assert page.find(".//div[@aria-label='Избыток']/table/tbody/tr/td[5]").text == "> 12,3"
     finally:
         workbook.close()
     visible_text = "".join(page.itertext())
-    assert "ещё 1 незначительный риск" in visible_text
+    assert "В XLSX есть ещё 1 SKU с оценкой потерь менее 1 шт." in visible_text
     assert "Пояснение LLM · Сводка <&" in visible_text
     assert "Пояснение LLM · К заказу 1 шт." in visible_text
 
@@ -118,7 +118,7 @@ def test_dashboard_splits_supplier_batches_and_uses_calendar_dates_in_decision(t
     dashboard = tmp_path / "index.html"
     write_dashboard(facts, dashboard, run_date=day + timedelta(days=2), previous_run=None, changes=[])
     page = ElementTree.fromstring(dashboard.read_text(encoding="utf-8").split("\n", 1)[1])
-    suppliers = page.findall(".//section[@id='orders']/details/summary")
+    suppliers = page.findall(".//section[@id='orders']/div/div/details/summary")
     assert [supplier.find("strong").text for supplier in suppliers] == ["SUP-Z", "SUP-B", "SUP-A"]
     assert [batch.text for batch in suppliers[0].findall("span[@class='batch']")] == [
         "Обычная партия — Сейчас — 3 шт.", "Сезонная партия — до 12.09.2026 — 6 шт.",
@@ -161,7 +161,7 @@ def test_sku_labels_on_page_and_in_workbook(tmp_path):
     expected = {"SKU-1": "Обогреватели · BRD-A<& · цена 7/10", "SKU-2": "new_category · цена 4/10"}
     page = ElementTree.fromstring(dashboard.read_text(encoding="utf-8").split("\n", 1)[1])
     for section, sku_path in (
-        ("orders", ".//ul/li/strong"),
+        ("orders", ".//ul/li/details/summary/span/strong"),
         ("risks", ".//tbody/tr/td[1]"),
         ("excess", ".//tbody/tr/td[1]"),
         ("seasons", ".//ul/li"),
