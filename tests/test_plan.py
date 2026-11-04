@@ -456,10 +456,12 @@ def test_sleeping_sku_is_reported_without_an_order(export):
 @pytest.mark.parametrize(
     ("markup", "prior_markup", "previous", "segment", "can_order"),
     [
-        ("24", "24", None, "На пересмотр", False),
-        ("25", "25", None, "Условно к закупке", True),
-        ("27", "24", None, "На пересмотр", False),
-        ("27", "24", "К закупке", "К закупке", True),
+        ("19.99", "35", None, "На пересмотр", False),
+        ("20", "35", None, "Условно к закупке", True),
+        ("24.99", "35", None, "Условно к закупке", True),
+        ("25", "35", None, "К закупке", True),
+        ("27", "19", None, "На пересмотр", False),
+        ("27", "19", "К закупке", "К закупке", True),
         ("29", "35", "На пересмотр", "На пересмотр", False),
         ("30", "24", "На пересмотр", "К закупке", True),
         ("", "35", None, "На пересмотр", False),
@@ -488,6 +490,27 @@ def test_segment_uses_markup_priority_and_hysteresis(export, markup, prior_marku
     assert "Возвраты > 10%" in row.sku_flags
     assert ("Проверить себестоимость" in row.sku_flags) == (markup == "")
     assert not row.is_new
+
+
+@pytest.mark.parametrize(
+    ("missing_units", "segment"),
+    [(9, Segment.PURCHASE), (10, Segment.PURCHASE), (11, Segment.REVIEW)],
+)
+def test_missing_cost_uses_share_of_units_and_keeps_known_markup(export, missing_units, segment):
+    sales = export / "sales_monthly.csv"
+    header = sales.read_text(encoding="utf-8").splitlines()[0]
+    sales.write_text(
+        header + "\n"
+        "SKU-1,tools,2026-04,2,0,1,20,0\n"
+        "SKU-1,tools,2026-05,8,0,1,40,0\n"
+        f"SKU-1,tools,2026-06,{missing_units},0,1,,0\n",
+        encoding="utf-8",
+    )
+
+    row, = plan(export).recommendations
+    assert row.markup_pct_12m == pytest.approx(36)
+    assert row.segment == segment
+    assert "Проверить себестоимость" in row.sku_flags
 
 
 def test_pilot_export_partitions_every_sku_and_flags_missing_supplier_timing(tmp_path):

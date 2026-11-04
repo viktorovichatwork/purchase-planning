@@ -1,12 +1,20 @@
 from collections import deque
 from dataclasses import dataclass
 from datetime import date
+from enum import StrEnum
 from math import fsum
 
 from purchase_planning.facts import Segment
 
-MIN_MARKUP_PCT = 25
+REVIEW_MARKUP_PCT = 20
+PURCHASE_MARKUP_PCT = 25
 RECOVERY_MARKUP_PCT = 30
+
+
+class ReviewReason(StrEnum):
+    MISSING_COST = "Себестоимость неизвестна более чем для 50% проданных штук"
+    LOW_MARKUP = "Наценка ниже 20%"
+    HYSTERESIS = "Гистерезис: наценка ниже 30%"
 
 
 def month_index(day: date) -> int:
@@ -33,7 +41,7 @@ class Assortment:
 
 def _markup_state(
     sales: list[Sale], last_complete_month: int, previous_segment: Segment | None,
-) -> tuple[float | None, bool]:
+) -> tuple[float | None, float, ReviewReason | None]:
     window: deque[Sale] = deque()
     complete_sales = sorted(
         (
@@ -44,7 +52,7 @@ def _markup_state(
     )
     pending = iter(complete_sales)
     next_sale = next(pending, None)
-    on_review = False
+    reason = None
     markup = None
     start = month_index(next_sale.month) if next_sale else last_complete_month
     for month in range(start, last_complete_month + 1):
@@ -54,19 +62,23 @@ def _markup_state(
             window.append(next_sale)
             next_sale = next(pending, None)
         priced_sales = [(sale.quantity, sale.markup_pct) for sale in window if sale.markup_pct is not None]
+        priced_units = fsum(quantity for quantity, _ in priced_sales)
+        missing_units = fsum(sale.quantity for sale in window if sale.markup_pct is None)
         markup = None
-        if priced_sales and len(priced_sales) == len(window):
-            markup = fsum(quantity * rate for quantity, rate in priced_sales) / fsum(
-                quantity for quantity, _ in priced_sales
-            )
+        if priced_units > 0:
+            markup = fsum(quantity * rate for quantity, rate in priced_sales) / priced_units
+        was_on_review = reason is not None
         if month == last_complete_month and previous_segment is not None:
-            on_review = previous_segment == Segment.REVIEW
-        if window:
-            if markup is None or markup < MIN_MARKUP_PCT:
-                on_review = True
-            elif markup >= RECOVERY_MARKUP_PCT:
-                on_review = False
-    return markup, on_review
+            was_on_review = previous_segment == Segment.REVIEW
+        if missing_units > priced_units:
+            reason = ReviewReason.MISSING_COST
+        elif markup is not None and markup < REVIEW_MARKUP_PCT:
+            reason = ReviewReason.LOW_MARKUP
+        elif was_on_review and (markup is None or markup < RECOVERY_MARKUP_PCT):
+            reason = ReviewReason.HYSTERESIS
+        else:
+            reason = None
+    return markup, missing_units, reason
 
 
 def classify_sku(
@@ -77,14 +89,11 @@ def classify_sku(
     recent_sales = [sale for sale in sales if month_index(sale.month) > current_month - 12]
     sold = fsum(sale.quantity for sale in recent_sales)
     returned = fsum(sale.returns for sale in recent_sales)
-    markup, review = _markup_state(sales, last_complete_month, previous_segment)
+    markup, missing_units, review_reason = _markup_state(sales, last_complete_month, previous_segment)
     flags = []
-    missing_cost = any(
-        sale.quantity > 0 and sale.markup_pct is None for sale in recent_sales
-    )
-    if missing_cost or (markup is None and review and sold > 0) or (markup is not None and markup <= 0):
+    if missing_units > 0 or (markup is not None and markup <= 0):
         flags.append("Проверить себестоимость")
-    insufficient_markup = sold > 0 and markup is None and not missing_cost and not review
+    insufficient_markup = sold > 0 and markup is None and review_reason is None
     if insufficient_markup:
         flags.append("Мало данных о наценке")
     if sold > 0 and returned > sold * 0.10:
@@ -94,9 +103,10 @@ def classify_sku(
         segment = Segment.DEAD
     elif sold <= 0 and first_sale is not None:
         segment = Segment.SLEEPING
-    elif review or missing_cost:
+    elif review_reason is not None:
         segment = Segment.REVIEW
-    elif low_data or insufficient_markup or markup == MIN_MARKUP_PCT:
+        flags.append(review_reason)
+    elif low_data or insufficient_markup or (markup is not None and markup < PURCHASE_MARKUP_PCT):
         segment = Segment.CONDITIONAL
     else:
         segment = Segment.PURCHASE
