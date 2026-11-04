@@ -11,7 +11,7 @@ from purchase_planning.report import write_report
     ("run_date", "status"),
     [
         (date(2026, 9, 17), None),
-        (date(2026, 9, 18), "черновик, не размещать"),
+        (date(2026, 9, 18), "Устаревшая выгрузка"),
     ],
 )
 def test_order_sheet_uses_facts_and_marks_stale_exports(tmp_path, run_date, status):
@@ -28,7 +28,7 @@ def test_order_sheet_uses_facts_and_marks_stale_exports(tmp_path, run_date, stat
     try:
         sheet = workbook["Заказ по поставщикам"]
         assert sheet["B2"].value == status
-        assert list(sheet.values)[-2][:5] == ("SUP-1", "SKU-1", 25, 0, 0)
+        assert list(sheet.values)[-2][:6] == ("SUP-1", "SKU-1", None, 25, 0, 0)
     finally:
         workbook.close()
 
@@ -52,7 +52,7 @@ def test_order_sheet_prioritizes_due_suppliers_and_sums_rounded_lines(tmp_path):
     workbook = load_workbook(path)
     try:
         _, _, header, *rows = workbook["Заказ по поставщикам"].values
-        assert [row[:3] for row in rows] == [
+        assert [(row[0], row[1], row[header.index("К заказу")]) for row in rows] == [
             ("SUP-B", "SKU-3", 6), ("SUP-B", "SKU-2", 3), ("SUP-B", "Итого", 9),
             ("SUP-A", "SKU-1", 12), ("SUP-A", "Итого", 12),
         ]

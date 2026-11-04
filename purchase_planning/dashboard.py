@@ -1,5 +1,5 @@
-from collections import Counter
-from collections.abc import Iterable
+from collections import Counter, defaultdict
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from datetime import date, timedelta
 from html import escape
@@ -15,6 +15,7 @@ from purchase_planning.order_sheet import (
 )
 from purchase_planning.parameters import STALE_EXPORT_DAYS
 from purchase_planning.replenishment import inventory_summary
+from purchase_planning.sku_labels import category_name
 from purchase_planning.wording import days_text
 
 
@@ -69,9 +70,22 @@ def _decimal(value: float | None) -> str:
     return f"{value:.1f}".replace(".", ",") if value is not None else "—"
 
 
-def _table(label: str, headers: tuple[str, ...], rows: Iterable[tuple[object, ...]]) -> str:
+def _sku_caption(sku: str, labels: Mapping[str, str]) -> str:
+    label = labels.get(sku)
+    return f'<small class="sku-label">{escape(label)}</small>' if label else ""
+
+
+def _table(
+    label: str, headers: tuple[str, ...], rows: Iterable[tuple[object, ...]], *,
+    sku_labels: Mapping[str, str] | None = None,
+) -> str:
+    def cells(row: tuple[object, ...]) -> str:
+        first, *rest = map(str, row)
+        caption = _sku_caption(first, sku_labels) if sku_labels is not None else ""
+        return f"<td>{escape(first)}{caption}</td>" + "".join(f"<td>{escape(value)}</td>" for value in rest)
+
     body = "".join(
-        "<tr>" + "".join(f"<td>{escape(str(value))}</td>" for value in row) + "</tr>"
+        f"<tr>{cells(row)}</tr>"
         for row in rows
     )
     if not body:
@@ -83,7 +97,10 @@ def _table(label: str, headers: tuple[str, ...], rows: Iterable[tuple[object, ..
     )
 
 
-def _sku(row: Recommendation, facts: PlanFacts, explanation: str, supplier_flags: tuple[str, ...]) -> str:
+def _sku(
+    row: Recommendation, facts: PlanFacts, explanation: str, supplier_flags: tuple[str, ...],
+    labels: Mapping[str, str],
+) -> str:
     fields = (
         ("К заказу, шт.", displayed_order_qty(row)),
         ("Остаток, шт.", round(row.stock_at_calculation)),
@@ -100,10 +117,12 @@ def _sku(row: Recommendation, facts: PlanFacts, explanation: str, supplier_flags
     )
     fields_html = "".join(f"<dt>{label}</dt><dd>{escape(str(value))}</dd>" for label, value in fields)
     why = f"<p><strong>Пояснение LLM</strong> · {escape(explanation)}</p>" if explanation else ""
-    return f"<li><strong>{escape(row.sku_id)}</strong><dl>{fields_html}</dl>{why}</li>"
+    return f"<li><strong>{escape(row.sku_id)}</strong>{_sku_caption(row.sku_id, labels)}<dl>{fields_html}</dl>{why}</li>"
 
 
-def _order_table(facts: PlanFacts, schedules: list[SupplierSchedule], explanations: dict[str, str]) -> str:
+def _order_table(
+    facts: PlanFacts, schedules: list[SupplierSchedule], explanations: dict[str, str], labels: Mapping[str, str],
+) -> str:
     rows = []
     for schedule in schedules:
         as_of = facts.as_of
@@ -118,7 +137,7 @@ def _order_table(facts: PlanFacts, schedules: list[SupplierSchedule], explanatio
                 batch_date = f"до {_date(deadline)}" if seasonal else order_date_label(deadline, as_of, date_format="%d.%m.%Y")
                 quantity = sum(batch.quantity for batch in batches)
                 batch_lines.append(f'<span class="batch">{label} — {batch_date} — {quantity} шт.</span>')
-        skus = "".join(_sku(row, facts, explanations.get(row.sku_id, ""), schedule.flags) for row in schedule.lines)
+        skus = "".join(_sku(row, facts, explanations.get(row.sku_id, ""), schedule.flags, labels) for row in schedule.lines)
         rows.append(
             f'<details><summary><strong>{name}</strong> <span>Когда заказать — {when}</span>'
             f'{"".join(batch_lines)}</summary><ul class="skus">{skus}</ul></details>'
@@ -162,7 +181,7 @@ def _decision(
     return f'<dl class="decision">{cards}</dl><p>{comparison}</p>{llm}'
 
 
-def _risks(facts: PlanFacts) -> str:
+def _risks(facts: PlanFacts, labels: Mapping[str, str]) -> str:
     risks = stockout_rows(facts)
     visible = [row for row in risks if row.lost_sales >= 1]
     hidden = len(risks) - len(visible)
@@ -174,10 +193,11 @@ def _risks(facts: PlanFacts) -> str:
         ((row.sku_id, row.supplier_id, round(row.stock_at_calculation), round(row.in_transit),
           _date(row.stock_until), _date(row.arrival_date), row.stockout_days, round(row.lost_sales))
          for row in visible),
+        sku_labels=labels,
     ) + (f'<p class="meta">ещё {hidden} {hidden_label}</p>' if hidden else "")
 
 
-def _excess(facts: PlanFacts) -> str:
+def _excess(facts: PlanFacts, labels: Mapping[str, str]) -> str:
     return _table(
         "Избыток",
         ("SKU", "Поставщик", "Остаток, шт.", "В пути, шт.", "Покрытие, мес", "Дециль цены", "Порог, шт.", "Флаг"),
@@ -186,19 +206,26 @@ def _excess(facts: PlanFacts) -> str:
           round(row.excess_threshold) if row.excess_threshold is not None else "—",
           OrderFlag.RESCHEDULE if OrderFlag.RESCHEDULE in row.order_flags else "—")
          for row in excess_rows(facts)),
+        sku_labels=labels,
     )
 
 
-def _seasons(facts: PlanFacts) -> str:
-    deadlines: Counter[tuple[date, str, str]] = Counter()
+def _seasons(facts: PlanFacts, labels: Mapping[str, str]) -> str:
+    groups: dict[tuple[date, str, str], list[str]] = defaultdict(list)
     for row in facts.recommendations:
         if season := row.seasonal_order:
             deadline = season.deadline if season.deadline >= facts.as_of else season.next_deadline
-            deadlines[deadline, row.supplier_id, row.category] += 1
-    return _table(
-        "Сезонные заказы", ("Крайний срок", "Поставщик", "Категория", "SKU"),
-        ((_date(day), supplier, category, count) for (day, supplier, category), count in sorted(deadlines.items())),
-    )
+            groups[deadline, row.supplier_id, row.category].append(row.sku_id)
+    if not groups:
+        return "<p>Нет позиций.</p>"
+    sections = []
+    for (deadline, supplier, category), skus in sorted(groups.items()):
+        heading = " · ".join(escape(part) for part in (
+            _date(deadline), supplier or "Поставщик не указан", category_name(category), f"{len(skus)} SKU",
+        ) if part)
+        items = "".join(f"<li>{escape(sku)}{_sku_caption(sku, labels)}</li>" for sku in sorted(skus))
+        sections.append(f'<details><summary>{heading}</summary><ul class="skus">{items}</ul></details>')
+    return '<p class="meta">Раскройте группу, чтобы увидеть SKU.</p>' + "\n".join(sections)
 
 
 def _calendar(as_of: date, schedules: list[SupplierSchedule]) -> str:
@@ -260,10 +287,11 @@ def _backtest_quality(facts: PlanFacts) -> str:
 def write_dashboard(
     facts: PlanFacts, path: Path, *, run_date: date, previous_run: str | None, changes: list[Change],
     explanations: Explanations | None = None,
+    sku_labels: Mapping[str, str] | None = None,
 ) -> None:
     age = (run_date - facts.cutoff).days
     stale = age > STALE_EXPORT_DAYS
-    status = "Черновик, не размещать" if stale else "Актуально"
+    status = "Устаревшая выгрузка" if stale else "Актуально"
     status_class = "draft" if stale else "current"
     warnings = "".join(
         f"<p>{escape(warning)}</p>"
@@ -271,20 +299,22 @@ def write_dashboard(
     )
     inventory = "".join(f"<li>{name} — {count} SKU</li>" for name, count in inventory_summary(facts).items())
     schedules = _supplier_schedules(facts)
+    labels = sku_labels or {}
     sections = (
-        ("Сводка решения", _decision(facts, schedules, previous_run, changes, explanations.summary if explanations else "")),
-        ("Заказ по поставщикам", _order_table(facts, schedules, explanations.rows if explanations else {})),
-        ("Риски дефицита", _risks(facts)),
-        ("Избыток", _excess(facts)),
-        ("Сезонные заказы", _seasons(facts)),
-        ("Календарь заказов на 6 месяцев", _calendar(facts.as_of, schedules)),
-        ("Качество прогноза", _backtest_quality(facts)),
-        ("Запас", f"<ul>{inventory}</ul>"),
-        ("Сегменты ассортимента", _segments(facts)),
-        ("Флаги открытых заказов", _order_flags(facts)),
+        ("overview", "Сводка решения", _decision(facts, schedules, previous_run, changes, explanations.summary if explanations else "")),
+        ("orders", "Заказ по поставщикам", _order_table(facts, schedules, explanations.rows if explanations else {}, labels)),
+        ("risks", "Риски дефицита", _risks(facts, labels)),
+        ("excess", "Избыток", _excess(facts, labels)),
+        ("seasons", "Сезонные заказы", _seasons(facts, labels)),
+        ("calendar", "Календарь заказов на 6 месяцев", _calendar(facts.as_of, schedules)),
+        ("forecast-quality", "Качество прогноза", _backtest_quality(facts)),
+        ("stock", "Запас", f"<ul>{inventory}</ul>"),
+        ("segments", "Сегменты ассортимента", _segments(facts)),
+        ("order-flags", "Флаги открытых заказов", _order_flags(facts)),
     )
-    content = "\n".join(f"<section><h2>{title}</h2>{body}</section>" for title, body in sections)
+    content = "\n".join(f'<section id="{key}"><h2>{title}</h2>{body}</section>' for key, title, body in sections)
     history_link = '<a href="history.html">История запусков</a>' if previous_run else ""
+    stale_note = "<p>Перед размещением заказа загрузите свежую выгрузку ERP.</p>" if stale else ""
     path.write_text(
         f"""<!doctype html>
 <html lang="ru">
@@ -327,6 +357,7 @@ p {{ margin: .5rem 0; }}
 .draft {{ background: var(--draft-bg); color: var(--draft); }}
 .current {{ color: var(--accent); padding-left: 0; }}
 a {{ color: var(--accent); display: inline-flex; align-items: center; min-height: 44px; }}
+.actions {{ display: flex; flex-wrap: wrap; gap: 0 1.25rem; }}
 .decision {{ display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .75rem; }}
 .decision div {{ border-top: 1px solid var(--line); padding: .5rem 0; }}
 .decision dd {{ font-size: 1.4rem; font-weight: 700; }}
@@ -337,6 +368,8 @@ summary {{ padding: .7rem .25rem; cursor: pointer; overflow-wrap: anywhere; }}
 .skus {{ padding: 0; list-style: none; }}
 .skus li {{ border-top: 1px solid var(--line); padding: .6rem 0 .6rem 1rem; overflow-wrap: anywhere; }}
 .skus dl {{ display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 2fr); gap: .1rem .5rem; margin: .3rem 0; }}
+.sku-label {{ display: block; color: var(--muted); font-size: .85rem; overflow-wrap: anywhere; }}
+td:has(.sku-label) {{ min-width: 12rem; }}
 .table-scroll {{ overflow-x: auto; }}
 table {{ width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }}
 th, td {{ padding: .45rem .5rem; border-bottom: 1px solid var(--line); text-align: left; min-width: 5rem; }}
@@ -344,6 +377,11 @@ svg {{ width: min(100%, 24rem); display: block; }}
 svg text {{ fill: var(--ink); font-size: 11px; }}
 svg rect {{ fill: var(--accent); }}
 ul {{ margin: 0; padding-left: 1.25rem; }}
+.guide {{ border-top: 1px solid var(--line); padding-top: 1rem; }}
+.guide h3 {{ font-size: 1rem; margin: 1rem 0 .25rem; }}
+.guide ol {{ margin: 0; padding-left: 1.25rem; }}
+.guide li + li {{ margin-top: .4rem; }}
+.guide li a {{ display: inline; }}
 </style>
 </head>
 <body>
@@ -352,11 +390,28 @@ ul {{ margin: 0; padding-left: 1.25rem; }}
 <h1>План закупок</h1>
 <p class="meta">Срез <time datetime="{facts.cutoff.isoformat()}">{facts.cutoff:%d.%m.%Y}</time> · {days_text(age)} на дату запуска</p>
 <p><strong class="{status_class}">{status}</strong></p>
+{stale_note}
+<nav class="actions" aria-label="Действия с отчётом">
 <a href="report.xlsx" download="report.xlsx">Скачать отчёт XLSX</a>
 {history_link}
+<a href="#guide">Как работать с порталом</a>
+</nav>
 {warnings}
 </header>
 {content}
+<section class="guide" id="guide">
+<h2>Как работать с порталом</h2>
+<h3>Проверить рекомендации</h3>
+<ol>
+<li>Проверьте дату среза. Если выгрузке больше {STALE_EXPORT_DAYS} дней на дату запуска, обновите данные перед заказом.</li>
+<li>В разделе <a href="#orders">«Заказ по поставщикам»</a> раскройте поставщика и сверьте количество, сроки и флаги по SKU. Позиции «Условно к закупке» требуют подтверждения байера.</li>
+<li>Проверьте <a href="#risks">риски дефицита</a>, <a href="#excess">избыток</a> и <a href="#seasons">сроки сезонных заказов</a>. Скачайте XLSX для работы со списками и проверки прогноза.</li>
+</ol>
+<h3>Прочитать подпись SKU</h3>
+<p>Под кодом SKU указаны категория, обезличенный бренд и ценовая группа внутри категории. «Цена 7/10» означает седьмой дециль. В XLSX эта подпись находится в колонке «Товар».</p>
+<h3>Обновить выгрузку</h3>
+<p>Загрузите свежие CSV из ERP и файл с датой среза <code>export_meta.json</code> в папку <code>inbox/</code> на GitHub. После успешного расчёта и публикации откройте портал и проверьте дату среза. Предыдущие отчёты доступны в истории запусков.</p>
+</section>
 </main>
 </body>
 </html>

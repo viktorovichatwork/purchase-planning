@@ -15,6 +15,7 @@ from purchase_planning.order_sheet import (
 )
 from purchase_planning.parameters import PARAMETER_NUMBER_FORMATS, STALE_EXPORT_DAYS, llm_max_skus, run_parameters
 from purchase_planning.replenishment import inventory_summary
+from purchase_planning.sku_labels import category_name
 
 
 def _stock_until_label(row: Recommendation) -> str | None:
@@ -38,16 +39,18 @@ def _sku_order_date(row: Recommendation, deadline: date | None, as_of: date) -> 
 def write_report(
     facts: PlanFacts, path: str | Path, *, run_date: date | None = None,
     parameters: Mapping[str, str | int | float] | None = None,
+    sku_labels: Mapping[str, str] | None = None,
 ) -> None:
     if run_date is None:
         run_date = date.today()
+    labels = sku_labels or {}
 
     workbook = Workbook()
     sheet = workbook.active
     assert sheet is not None
     sheet.title = "Заказ по поставщикам"
     sheet.append(("Дата среза", facts.cutoff.isoformat()))
-    status = "черновик, не размещать" if (run_date - facts.cutoff).days > STALE_EXPORT_DAYS else None
+    status = "Устаревшая выгрузка" if (run_date - facts.cutoff).days > STALE_EXPORT_DAYS else None
     sheet.append(("Статус", status))
     if facts.cutoff_warning:
         sheet.append(("Предупреждение", facts.cutoff_warning))
@@ -56,7 +59,7 @@ def write_report(
     if facts.backtest_warning:
         sheet.append(("Предупреждение", facts.backtest_warning))
     headers = (
-        "Поставщик", "SKU", "К заказу", "Исключено дефицитных месяцев",
+        "Поставщик", "SKU", "Товар", "К заказу", "Исключено дефицитных месяцев",
         "Прогноз на горизонт, шт.",
         "Мало данных", "Плечо, дней", "Источник плеча", "Цикл, дней",
         "Остаток на дату расчёта", "Дата прихода нового заказа", "Остаток на дату прихода",
@@ -72,7 +75,7 @@ def write_report(
     summaries = {supplier.supplier_id: supplier for supplier in facts.suppliers}
     forecast_sheet = workbook.create_sheet("Прогноз")
     forecast_sheet.append((
-        "Поставщик", "SKU", *(f"Прогноз {month:%Y-%m}" for month in facts.forecast_months),
+        "Поставщик", "SKU", "Товар", *(f"Прогноз {month:%Y-%m}" for month in facts.forecast_months),
         "Покрытие, мес", "Хватит до", "Заказать не позже",
     ))
     segment_sheets: dict[Segment, Worksheet] = {}
@@ -80,6 +83,8 @@ def write_report(
         if segment != Segment.PURCHASE:
             segment_sheets[segment] = workbook.create_sheet(segment)
             segment_sheets[segment].append(headers)
+    for sku_sheet in (sheet, forecast_sheet, *segment_sheets.values()):
+        sku_sheet.column_dimensions["C"].width = 48
     orders = supplier_orders(facts)
     supplier_dates = {}
     for supplier, group, _ in orders:
@@ -102,7 +107,8 @@ def write_report(
         if sum(round(qty) for _, qty in row.in_transit_by_month) != round(row.in_transit):
             transit += f" · итого {round(row.in_transit)} шт."
         target.append((
-            row.supplier_id or "Поставщик не указан", row.sku_id, displayed_order_qty(row), row.excluded_stockout_months,
+            row.supplier_id or "Поставщик не указан", row.sku_id, labels.get(row.sku_id) or None,
+            displayed_order_qty(row), row.excluded_stockout_months,
             round(fsum(row.monthly_forecast)), "Да" if row.low_data else None,
             timing.lead_days if timing else None, timing.lead_source if timing else None,
             timing.cycle_days if timing else None, round(row.stock_at_calculation),
@@ -127,7 +133,7 @@ def write_report(
             ),
             _sku_order_date(row, regular_placement or facts.as_of, facts.as_of) if row.regular_order_qty else None,
         ))
-        for cell in target[target.max_row][:2]:
+        for cell in target[target.max_row][:3]:
             cell.data_type = "s"
         for header in ("Остаток на дату прихода", "Целевой запас", "Страховой запас"):
             target.cell(target.max_row, headers.index(header) + 1).number_format = "0"
@@ -140,8 +146,8 @@ def write_report(
             append_sku(sheet, row)
         summary = summaries.get(supplier)
         sheet.append((
-            supplier or "Поставщик не указан", "Итого", total,
-            *([None] * (headers.index("Флаги поставщика") - 3)),
+            supplier or "Поставщик не указан", "Итого", None, total,
+            *([None] * (headers.index("Флаги поставщика") - headers.index("К заказу") - 1)),
             (", ".join(summary.timing.flags) or None) if summary else None,
             ("Да" if summary.time_to_order else "Нет") if summary else None,
             *([None] * (headers.index("Дата заказа у поставщика") - headers.index("Пора заказывать у поставщика") - 1)),
@@ -153,12 +159,13 @@ def write_report(
 
     for row in sorted(facts.recommendations, key=lambda row: (row.supplier_id, row.sku_id)):
         forecast_sheet.append((
-            row.supplier_id or "Поставщик не указан", row.sku_id, *(round(qty) for qty in row.monthly_forecast),
+            row.supplier_id or "Поставщик не указан", row.sku_id, labels.get(row.sku_id) or None,
+            *(round(qty) for qty in row.monthly_forecast),
             _coverage_cell(row),
             _stock_until_label(row), _sku_order_date(row, row.order_by, facts.as_of),
         ))
-        forecast_sheet.cell(forecast_sheet.max_row, 3 + len(facts.forecast_months)).number_format = "0.0"
-        for cell in forecast_sheet[forecast_sheet.max_row][:2]:
+        forecast_sheet.cell(forecast_sheet.max_row, 4 + len(facts.forecast_months)).number_format = "0.0"
+        for cell in forecast_sheet[forecast_sheet.max_row][:3]:
             cell.data_type = "s"
         if row.segment not in {Segment.PURCHASE, Segment.REVIEW}:
             append_sku(segment_sheets[row.segment], row)
@@ -169,7 +176,7 @@ def write_report(
     for row in review:
         append_sku(segment_sheets[Segment.REVIEW], row)
 
-    _append_inventory_sheets(workbook, facts)
+    _append_inventory_sheets(workbook, facts, labels)
     _append_backtest(workbook.create_sheet("Бэктест"), facts)
     parameter_sheet = workbook.create_sheet("Параметры")
     parameter_sheet.append(("Параметр", "Значение"))
@@ -187,10 +194,10 @@ def write_report(
     workbook.save(path)
 
 
-def _append_inventory_sheets(workbook: Workbook, facts: PlanFacts) -> None:
+def _append_inventory_sheets(workbook: Workbook, facts: PlanFacts, labels: Mapping[str, str]) -> None:
     seasonal = workbook.create_sheet("Сезонные заказы")
     seasonal.append((
-        "SKU", "Поставщик", "Категория", "Начало окна", "Конец окна", "Крайний срок",
+        "SKU", "Товар", "Поставщик", "Категория", "Начало окна", "Конец окна", "Крайний срок",
         "Приход при заказе сегодня", "Остаток окна, мес",
         "Заказ при сезонном сервисе, шт.", "Заказ при обычном сервисе, шт.",
         "Прогноз остатка на конец сезона, шт.", "Крайний срок следующего сезона", "Решение", "Флаг",
@@ -198,10 +205,10 @@ def _append_inventory_sheets(workbook: Workbook, facts: PlanFacts) -> None:
         "Целевой запас, шт.", "Страховой запас, шт.",
     ))
     excess = workbook.create_sheet("Избыток")
-    excess.append(("SKU", "Поставщик", "Категория", "Остаток", "В пути", "Покрытие, мес",
+    excess.append(("SKU", "Товар", "Поставщик", "Категория", "Остаток", "В пути", "Покрытие, мес",
                    "Дециль цены", "Порог избытка, шт.", "Флаг"))
     risks = workbook.create_sheet("Риски дефицита")
-    risks.append(("SKU", "Поставщик", "Остаток", "В пути", "Хватит до", "Приход при заказе сегодня",
+    risks.append(("SKU", "Товар", "Поставщик", "Остаток", "В пути", "Хватит до", "Приход при заказе сегодня",
                   "Дней без товара", "Упущенные продажи, шт."))
     summary = workbook.create_sheet("Сводка")
     summary.append(("Показатель", "SKU"))
@@ -213,7 +220,8 @@ def _append_inventory_sheets(workbook: Workbook, facts: PlanFacts) -> None:
         if season is None:
             continue
         seasonal.append((
-            row.sku_id, row.supplier_id, row.category, season.window_start.isoformat(), season.window_end.isoformat(),
+            row.sku_id, labels.get(row.sku_id) or None, row.supplier_id, category_name(row.category),
+            season.window_start.isoformat(), season.window_end.isoformat(),
             season.deadline.isoformat(), row.arrival_date.isoformat() if row.arrival_date else None,
             round(season.months_remaining, 1), rounded_quantity(season.order_qty, row.order_multiple),
             rounded_quantity(season.ordinary_service_qty, row.order_multiple), round(season.stock_at_season_end),
@@ -222,32 +230,36 @@ def _append_inventory_sheets(workbook: Workbook, facts: PlanFacts) -> None:
             round(season.order_qty), row.order_multiple,
             round(season.stock_at_arrival), round(season.target_stock), round(season.safety_stock),
         ))
-        seasonal.cell(seasonal.max_row, 8).number_format = "0.0"
+        seasonal.cell(seasonal.max_row, 9).number_format = "0.0"
+        seasonal.cell(seasonal.max_row, 4).data_type = "s"
 
     for row in excess_rows(facts):
         excess.append((
-            row.sku_id, row.supplier_id, row.category, round(row.stock_at_calculation), round(row.in_transit),
+            row.sku_id, labels.get(row.sku_id) or None, row.supplier_id, row.category,
+            round(row.stock_at_calculation), round(row.in_transit),
             _coverage_cell(row),
             row.price_decile, round(row.excess_threshold) if row.excess_threshold is not None else None,
             OrderFlag.RESCHEDULE if OrderFlag.RESCHEDULE in row.order_flags else None,
         ))
-        excess.cell(excess.max_row, 6).number_format = "0.0"
+        excess.cell(excess.max_row, 7).number_format = "0.0"
 
     for row in stockout_rows(facts):
         risks.append((
-            row.sku_id, row.supplier_id, round(row.stock_at_calculation), round(row.in_transit),
+            row.sku_id, labels.get(row.sku_id) or None, row.supplier_id,
+            round(row.stock_at_calculation), round(row.in_transit),
             row.stock_until.isoformat() if row.stock_until else None,
             row.arrival_date.isoformat() if row.arrival_date else None,
             row.stockout_days, round(row.lost_sales),
         ))
     for sheet in (seasonal, excess, risks):
-        sheet.freeze_panes = "C2"
+        sheet.freeze_panes = "D2"
         sheet.auto_filter.ref = sheet.dimensions
-        for cells in sheet.iter_rows(min_row=2, max_col=2):
+        for cells in sheet.iter_rows(min_row=2, max_col=3):
             for cell in cells:
                 cell.data_type = "s"
         for cell in sheet[1]:
             sheet.column_dimensions[cell.column_letter].width = max(15, len(str(cell.value)) + 2)
+        sheet.column_dimensions["B"].width = 48
 
 
 def _append_backtest(sheet: Worksheet, facts: PlanFacts) -> None:

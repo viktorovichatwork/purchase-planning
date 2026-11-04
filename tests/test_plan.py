@@ -235,24 +235,26 @@ def test_export_to_order_sheet(export):
     workbook = load_workbook(path)
     try:
         header, values, total = list(workbook["Заказ по поставщикам"].values)[-3:]
-        assert header[3:6] == ("Исключено дефицитных месяцев", "Прогноз на горизонт, шт.", "Мало данных")
+        assert header[2:7] == (
+            "Товар", "К заказу", "Исключено дефицитных месяцев", "Прогноз на горизонт, шт.", "Мало данных",
+        )
         assert values[:2] == (row.supplier_id, row.sku_id)
-        assert values[2:5] == (20, 0, round(sum(row.monthly_forecast)))
+        assert values[3:6] == (20, 0, round(sum(row.monthly_forecast)))
         assert values[header.index("Целевой запас")] == pytest.approx(19.3763441)
         assert values[header.index("Страховой запас")] == 0
         assert values[header.index("Тип спроса")] == "Регулярный"
-        assert values[6:9] == (201, "Вся история заказов + 20 дней", 30)
+        assert values[7:10] == (201, "Вся история заказов + 20 дней", 30)
         sales_column = header.index("Продажи за 12 мес, шт.")
         assert header[sales_column + 1] == "Оценка спроса в год, шт."
         assert values[sales_column:sales_column + 2] == (920, 240)
         forecast_header, forecast_row = list(workbook["Прогноз"].values)
-        assert forecast_header[2:2 + len(facts.forecast_months)] == tuple(
+        assert forecast_header[3:3 + len(facts.forecast_months)] == tuple(
             f"Прогноз {month:%Y-%m}" for month in facts.forecast_months
         )
-        assert forecast_row[2:2 + len(facts.forecast_months)] == tuple(round(qty) for qty in row.monthly_forecast)
+        assert forecast_row[3:3 + len(facts.forecast_months)] == tuple(round(qty) for qty in row.monthly_forecast)
         assert forecast_row[forecast_header.index("Покрытие, мес")] == 0
         assert total[:2] == ("SUP-1", "Итого")
-        assert total[2] == 20
+        assert total[header.index("К заказу")] == 20
         assert total[header.index("Пора заказывать у поставщика")] == "Да"
     finally:
         workbook.close()
@@ -331,7 +333,7 @@ def test_saved_backtest_excludes_stockouts_and_calibrates_the_order(export):
         assert row[headers.index("Страховой запас")] == pytest.approx(25.8064516)
         assert row[headers.index("Кратность")] == 50
         assert row[headers.index("К заказу до округления, шт.")] == pytest.approx(51.6129032)
-        assert row[2] == total[2] == 100
+        assert row[headers.index("К заказу")] == total[headers.index("К заказу")] == 100
     finally:
         workbook.close()
     assert "57,1%" in (run / "index.html").read_text(encoding="utf-8")
@@ -577,7 +579,9 @@ def test_sleeping_sku_is_reported_without_an_order(export):
     write_report(facts, path)
     with path.open("rb") as report:
         workbook = load_workbook(report)
-        assert list(workbook["Спящие"].values)[1][:3] == ("SUP-1", "SKU-1", 0)
+        header, sleeping = workbook["Спящие"].values
+        assert sleeping[:2] == ("SUP-1", "SKU-1")
+        assert sleeping[header.index("К заказу")] == 0
         assert all("SKU-1" not in values for values in workbook["Заказ по поставщикам"].values)
         workbook.close()
 
@@ -666,17 +670,17 @@ def test_pilot_export_lists_orders_and_flags_missing_supplier_timing(tmp_path):
     try:
         for segment in Segment:
             name = "Заказ по поставщикам" if segment == Segment.PURCHASE else segment
+            header = next(row for row in workbook[name].values if row[1] == "SKU")
             data = [row for row in workbook[name].values if row[1] in catalog]
             assert sorted(row[1] for row in data) == sorted(
                 row.sku_id for row in rows.values()
                 if (row.order_qty > 0 if segment == Segment.PURCHASE else row.segment == segment)
             )
             if segment == Segment.REVIEW:
-                header = next(workbook[name].values)
                 sales = [row[header.index("Продажи за 12 мес, шт.")] for row in data]
                 assert sales == sorted(sales, reverse=True)
             if segment in {Segment.DEAD, Segment.SLEEPING, Segment.REVIEW}:
-                assert all(row[2] == 0 for row in data)
+                assert all(row[header.index("К заказу")] == 0 for row in data)
     finally:
         workbook.close()
 
@@ -716,7 +720,7 @@ def test_first_stockout_before_in_transit_receipt(export):
     with_workbook = load_workbook(path, read_only=True)
     try:
         _, risk = list(with_workbook["Риски дефицита"].values)
-        assert risk[:5] == ("SKU-1", "SUP-1", 60, 100, "2026-03-31")
+        assert risk[:6] == ("SKU-1", None, "SUP-1", 60, 100, "2026-03-31")
         headers, forecast = list(with_workbook["Прогноз"].values)
         assert forecast[headers.index("Покрытие, мес")] == 2
     finally:

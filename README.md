@@ -39,8 +39,9 @@
 
 ```python
 from purchase_planning import plan, write_report
+from purchase_planning.sku_labels import load_sku_labels
 
-write_report(plan("."), "order.xlsx")
+write_report(plan("."), "order.xlsx", sku_labels=load_sku_labels("."))
 ```
 
 ### `sku_dim.csv` — справочник товаров (791 строка)
