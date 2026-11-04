@@ -6,28 +6,39 @@ from pathlib import Path
 from purchase_planning.calibration import METRIC_HEADERS
 from purchase_planning.comparison import Change, summarize
 from purchase_planning.facts import OrderFlag, PlanFacts, Segment
-from purchase_planning.order_sheet import supplier_orders
+from purchase_planning.order_sheet import order_date_label, supplier_orders
 from purchase_planning.parameters import STALE_EXPORT_DAYS
+from purchase_planning.replenishment import inventory_summary
 
 
 def _order_table(facts: PlanFacts) -> str:
     summaries = {supplier.supplier_id: supplier for supplier in facts.suppliers}
     rows = []
-    for supplier, _, total in supplier_orders(facts):
+    for supplier, lines, total in supplier_orders(facts):
         summary = summaries.get(supplier)
-        if summary and summary.time_to_order:
+        if summary and summary.next_order_date:
+            when = order_date_label(summary.next_order_date, facts.as_of, date_format="%d.%m.%Y")
+        elif summary and summary.time_to_order:
             when = "Сейчас"
-        elif summary and summary.next_order_date:
-            when = f"{summary.next_order_date:%d.%m.%Y}"
         else:
-            when = "Срок не рассчитан"
+            when = "Дольше горизонта"
         name = escape(supplier or "Поставщик не указан")
-        rows.append(f'<tr><th scope="row">{name}</th><td>{when}</td><td>{total}</td></tr>')
+        due = "Да" if summary and summary.time_to_order else "Нет"
+        deadline = min(
+            (row.seasonal_order.deadline for row in lines if row.seasonal_order and row.seasonal_order.actionable),
+            default=None,
+        )
+        season = f"{deadline:%d.%m.%Y}" if deadline else "—"
+        rows.append(
+            f'<tr><th scope="row">{name}</th><td>{when}</td><td>{total}</td>'
+            f'<td>{due}</td><td>{season}</td></tr>'
+        )
     if not rows:
         return "<p>Нет позиций с положительным количеством к заказу.</p>"
     return (
         '<table><thead><tr><th scope="col">Поставщик</th><th scope="col">Когда заказать</th>'
-        '<th scope="col">К заказу, шт.</th></tr></thead><tbody>'
+        '<th scope="col">К заказу, шт.</th><th scope="col">Пора заказывать</th>'
+        '<th scope="col">Срок сезона</th></tr></thead><tbody>'
         + "\n".join(rows) + "</tbody></table>"
     )
 
@@ -70,9 +81,11 @@ def write_dashboard(
         f"<p>{escape(warning)}</p>"
         for warning in (facts.cutoff_warning, facts.supply_warning) if warning
     )
+    inventory = "".join(f"<li>{name} — {count} SKU</li>" for name, count in inventory_summary(facts).items())
     # Extend the dashboard by adding a section and its renderer here.
     sections = (
         ("Заказ по поставщикам", _order_table(facts)),
+        ("Запас", f"<ul>{inventory}</ul>"),
         ("Сегменты ассортимента", _segments(facts)),
         ("Флаги открытых заказов", _order_flags(facts)),
         ("Что изменилось с прошлого запуска", f"<p>{escape(summarize(previous_run, changes))}</p>"),
@@ -123,8 +136,7 @@ p {{ margin: .5rem 0; }}
 a {{ color: var(--accent); display: inline-flex; align-items: center; min-height: 44px; }}
 table {{ width: 100%; border-collapse: collapse; table-layout: fixed; font-variant-numeric: tabular-nums; }}
 th, td {{ padding: .45rem .25rem; border-bottom: 1px solid var(--line); text-align: left; overflow-wrap: anywhere; }}
-th:first-child {{ width: 38%; }}
-th:last-child, td:last-child {{ width: 23%; text-align: right; }}
+th:first-child {{ width: 25%; }}
 ul {{ margin: 0; padding-left: 1.25rem; }}
 </style>
 </head>

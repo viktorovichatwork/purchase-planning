@@ -14,11 +14,19 @@ class Segment(StrEnum):
 class OrderFlag(StrEnum):
     STUCK = "Зависший заказ"
     TAIL = "Хвост заказа"
+    RESCHEDULE = "Перенести/отменить открытый заказ"
 
 
 class DemandType(StrEnum):
     REGULAR = "Регулярный"
     INTERMITTENT = "Прерывистый"
+
+
+class SeasonStatus(StrEnum):
+    ON_TIME = "Сезонный"
+    LATE = "Поздний"
+    NOT_RECOMMENDED = "Не рекомендуется"
+    MISSED = "Приход после окна"
 
 
 @dataclass(frozen=True)
@@ -63,6 +71,31 @@ class CategoryProfile:
 
 
 @dataclass(frozen=True)
+class SeasonalOrder:
+    window_start: date
+    window_end: date
+    deadline: date
+    days_late: int
+    months_remaining: float
+    order_qty: float
+    ordinary_service_qty: float
+    stock_at_season_end: float
+    next_deadline: date
+    status: SeasonStatus
+    stock_at_arrival: float
+    target_stock: float
+    safety_stock: float
+
+    @property
+    def actionable(self) -> bool:
+        return self.order_qty > 0 and self.status in {SeasonStatus.ON_TIME, SeasonStatus.LATE}
+
+    @property
+    def expedite(self) -> bool:
+        return self.days_late > 0
+
+
+@dataclass(frozen=True)
 class Recommendation:
     sku_id: str
     supplier_id: str
@@ -87,6 +120,22 @@ class Recommendation:
     target_stock: float | None = None
     safety_stock: float | None = None
     order_multiple: int = 1
+    coverage_months: float | None = None
+    stock_until: date | None = None
+    order_by: date | None = None
+    stockout_days: int = 0
+    lost_sales: float = 0.0
+    excess_threshold: float | None = None
+    excess: bool = False
+    price_decile: int | None = None
+    seasonal_order: SeasonalOrder | None = None
+    regular_order_qty: float | None = None
+    regular_order_date: date | None = None
+    grouped_season_deadline: date | None = None
+
+    @property
+    def in_transit(self) -> float:
+        return sum(quantity for _, quantity in self.in_transit_by_month)
 
 
 @dataclass(frozen=True)

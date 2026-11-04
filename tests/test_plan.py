@@ -163,6 +163,7 @@ def test_open_orders_respect_arrival_and_overdue_boundaries(export):
     assert row.in_transit_by_month == ((date(2026, 8, 1), 5), (date(2026, 10, 1), 1000))
     assert set(row.order_flags) == {
         "Хвост заказа", "Зависший заказ", "Дата прихода просроченного заказа оценена",
+        "Перенести/отменить открытый заказ",
     }
     assert row.order_qty == 0
     assert row.arrival_date == date(2027, 3, 15)
@@ -224,8 +225,11 @@ def test_export_to_order_sheet(export):
         assert header[sales_column + 1] == "Оценка спроса в год, шт."
         assert values[sales_column:sales_column + 2] == (920, 240)
         forecast_header, forecast_row = list(workbook["Прогноз"].values)
-        assert forecast_header[2:] == tuple(f"Прогноз {month:%Y-%m}" for month in facts.forecast_months)
-        assert forecast_row[2:] == tuple(round(qty) for qty in row.monthly_forecast)
+        assert forecast_header[2:2 + len(facts.forecast_months)] == tuple(
+            f"Прогноз {month:%Y-%m}" for month in facts.forecast_months
+        )
+        assert forecast_row[2:2 + len(facts.forecast_months)] == tuple(round(qty) for qty in row.monthly_forecast)
+        assert forecast_row[forecast_header.index("Покрытие, мес")] == 0
         assert total[:2] == ("SUP-1", "Итого")
         assert total[2] == 20
         assert total[header.index("Пора заказывать у поставщика")] == "Да"
@@ -576,8 +580,8 @@ def test_segment_uses_markup_priority_and_hysteresis(export, markup, prior_marku
     header = sales.read_text(encoding="utf-8").splitlines()[0]
     sales.write_text(
         header + "\n"
-        f"SKU-1,tools,2025-06,10,0,1,{prior_markup},0\n"
-        f"SKU-1,tools,2026-07,30,4,1,{markup},0\n",
+        + "".join(f"SKU-1,tools,2025-{month:02},30,0,1,{prior_markup},0\n" for month in range(1, 8))
+        + f"SKU-1,tools,2026-07,30,4,1,{markup},0\n",
         encoding="utf-8",
     )
     orders = export / "purchase_orders.csv"
@@ -657,6 +661,263 @@ def test_pilot_export_lists_orders_and_flags_missing_supplier_timing(tmp_path):
 
 def test_same_export_produces_identical_facts(export):
     assert plan(export) == plan(export)
+
+
+def test_first_stockout_before_in_transit_receipt(export):
+    (export / "export_meta.json").write_text('{"cutoff_date":"2026-01-31"}', encoding="utf-8")
+    (export / "stock_monthly.csv").write_text(
+        "sku_id,month,stock_qty\nSKU-1,2026-01,60\n", encoding="utf-8",
+    )
+    (export / "sales_monthly.csv").write_text(
+        "sku_id,category,month,qty_sold,qty_returned,orders_cnt,markup_pct,partial_month\n"
+        + "".join(f"SKU-1,tools,2025-{month:02},30,0,1,30,0\n" for month in range(1, 13))
+        + "SKU-1,tools,2026-01,0,0,0,,1\n",
+        encoding="utf-8",
+    )
+    orders = export / "purchase_orders.csv"
+    orders.write_text(
+        orders.read_text(encoding="utf-8").splitlines()[0] + "\n"
+        "PO-1,SKU-1,SUP-1,import,2025-06-01,,100,completed,10,10,10,0\n"
+        "PO-2,SKU-1,SUP-1,import,2025-09-01,2026-05-01,100,open,100,100,0,100\n",
+        encoding="utf-8",
+    )
+
+    facts = plan(export)
+    row = facts.recommendations[0]
+    assert row.stock_until == date(2026, 3, 31)
+    assert row.stockout_risk
+    assert row.stockout_days == 30
+    assert row.lost_sales == pytest.approx(30)
+
+    path = export / "order.xlsx"
+    write_report(facts, path)
+    with_workbook = load_workbook(path, read_only=True)
+    try:
+        _, risk = list(with_workbook["Риски дефицита"].values)
+        assert risk[:5] == ("SKU-1", "SUP-1", 60, 100, "2026-03-31")
+    finally:
+        with_workbook.close()
+
+
+def test_supplier_order_date_can_be_after_the_next_cycle(export):
+    (export / "export_meta.json").write_text('{"cutoff_date":"2026-01-31"}', encoding="utf-8")
+    (export / "stock_monthly.csv").write_text(
+        "sku_id,month,stock_qty\nSKU-1,2026-01,300\n", encoding="utf-8",
+    )
+    (export / "sales_monthly.csv").write_text(
+        "sku_id,category,month,qty_sold,qty_returned,orders_cnt,markup_pct,partial_month\n"
+        + "".join(f"SKU-1,tools,2025-{month:02},30,0,1,30,0\n" for month in range(1, 13))
+        + "SKU-1,tools,2026-01,0,0,0,,1\n",
+        encoding="utf-8",
+    )
+    orders = export / "purchase_orders.csv"
+    orders.write_text(
+        orders.read_text(encoding="utf-8").splitlines()[0] + "\n"
+        "PO-1,SKU-1,SUP-1,import,2025-06-01,,100,completed,10,10,10,0\n"
+        "PO-2,SKU-1,SUP-1,import,2025-07-31,,100,completed,10,10,10,0\n",
+        encoding="utf-8",
+    )
+    facts = plan(export)
+    row, = facts.recommendations
+    supplier, = facts.suppliers
+    assert row.coverage_months == pytest.approx(10)
+    assert row.stock_until == date(2026, 11, 30)
+    assert supplier.next_order_date == row.order_by == date(2026, 8, 2)
+    assert row.order_qty > 0
+    assert not supplier.time_to_order
+
+
+def _seasonal_export(export, cutoff):
+    (export / "export_meta.json").write_text(json.dumps({"cutoff_date": cutoff}), encoding="utf-8")
+    sales = export / "sales_monthly.csv"
+    sales.write_text(
+        sales.read_text(encoding="utf-8").splitlines()[0] + "\n"
+        "SKU-1,tools,2025-01,10,0,1,30,0\n"
+        "SKU-1,tools,2025-02,10,0,1,30,0\n"
+        "SKU-1,tools,2025-10,60,0,1,30,0\n"
+        "SKU-1,tools,2025-11,40,0,1,30,0\n"
+        "SKU-1,tools,2025-12,20,0,1,30,0\n"
+        "SKU-1,tools,2026-02,10,0,1,30,0\n",
+        encoding="utf-8",
+    )
+    (export / "stock_monthly.csv").write_text(
+        "sku_id,month,stock_qty\nSKU-1,2026-01,0\n", encoding="utf-8",
+    )
+    orders = export / "purchase_orders.csv"
+    orders.write_text(
+        orders.read_text(encoding="utf-8").splitlines()[0] + "\n"
+        "PO-1,SKU-1,SUP-1,import,2025-06-01,,100,completed,10,10,10,0\n"
+        "PO-2,SKU-1,SUP-1,import,2025-07-31,,100,completed,10,10,10,0\n",
+        encoding="utf-8",
+    )
+    (export / "receipts.csv").write_text(
+        "sku_id,receipt_date,qty,supplier_id,supply_type\nSKU-1,2025-12-01,10,SUP-1,import\n",
+        encoding="utf-8",
+    )
+    (export / "backtest.json").write_text(json.dumps({
+        "cutoff": "2026-05-01",
+        "origins": [],
+        "metrics": [],
+        "quantiles": {
+            group: {"windows": 1, "p75": 1.25, "p85": 1.5, "p95": 1.5}
+            for group in ("Регулярный", "Прерывистый")
+        },
+    }), encoding="utf-8")
+
+
+@pytest.mark.parametrize(("cutoff", "status", "quantity", "actionable"), [
+    ("2026-06-03", "Сезонный", 150, True),
+    ("2026-07-01", "Поздний", (60 + 60 * 2 / 31) * 1.25, True),
+    ("2026-08-15", "Не рекомендуется", (20 * 18 / 31) * 1.25, False),
+    ("2026-09-15", "Приход после окна", 0, False),
+])
+def test_seasonal_order_and_late_order_decisions(export, cutoff, status, quantity, actionable):
+    _seasonal_export(export, cutoff)
+    facts = plan(export)
+    row, = facts.recommendations
+    season = row.seasonal_order
+    assert season is not None
+    assert season.window_start == date(2026, 10, 1)
+    assert season.window_end == date(2026, 12, 31)
+    assert season.deadline == date(2026, 6, 3)
+    assert season.next_deadline == date(2027, 6, 3)
+    assert season.status == status
+    assert season.order_qty == pytest.approx(quantity)
+    assert season.ordinary_service_qty == pytest.approx(quantity / 1.25 * 1.5)
+    assert season.actionable == actionable
+    if actionable:
+        assert row.order_by == season.deadline
+        assert row.order_qty == pytest.approx(quantity)
+    if status == "Поздний":
+        assert row.segment == Segment.CONDITIONAL
+        assert "Рассмотреть ускоренную доставку" in row.sku_flags
+
+
+def test_regular_sku_joins_the_suppliers_seasonal_order(export):
+    _seasonal_export(export, "2026-05-15")
+    skus = export / "sku_dim.csv"
+    with skus.open("a", encoding="utf-8") as source:
+        source.write(
+            "SKU-2,steady,BRD-1,SUP-1,import,pcs,,0,0,1,2025-01,2025-12,12,360,30,0,2025-01\n"
+        )
+    with (export / "sales_monthly.csv").open("a", encoding="utf-8") as source:
+        for month in range(1, 13):
+            source.write(f"SKU-2,steady,2025-{month:02},30,0,1,30,0\n")
+    seasonal, steady = plan(export).recommendations
+    assert seasonal.seasonal_order is not None and seasonal.seasonal_order.actionable
+    assert steady.regular_order_date < date(2026, 5, 15)
+    assert steady.grouped_season_deadline == steady.order_by == date(2026, 6, 3)
+    assert steady.order_qty > 0
+
+    # This receipt arrives after the original arrival but before the grouped one.
+    with (export / "purchase_orders.csv").open("a", encoding="utf-8") as source:
+        source.write("PO-3,SKU-2,SUP-1,import,2025-07-31,2026-09-20,100,open,1000,1000,0,1000\n")
+    _, steady = plan(export).recommendations
+    assert steady.grouped_season_deadline == date(2026, 6, 3)
+    assert steady.order_qty == 0
+
+
+def test_seasonal_order_uses_known_lead_without_a_regular_cycle(export):
+    _seasonal_export(export, "2026-06-03")
+    orders = export / "purchase_orders.csv"
+    lines = orders.read_text(encoding="utf-8").splitlines()
+    orders.write_text("\n".join(lines[:2]) + "\n", encoding="utf-8")
+    facts = plan(export)
+    row, = facts.recommendations
+    supplier, = facts.suppliers
+    assert supplier.timing.cycle_days is None
+    assert supplier.time_to_order
+    assert row.order_qty == pytest.approx(150)
+    assert row.order_by == date(2026, 6, 3)
+
+
+def test_between_seasons_only_regular_demand_is_replenished(export):
+    _seasonal_export(export, "2026-01-01")
+    orders = export / "purchase_orders.csv"
+    orders.write_text(orders.read_text(encoding="utf-8").replace(",100,completed", ",0,completed"), encoding="utf-8")
+
+    row, = plan(export).recommendations
+    season = row.seasonal_order
+    assert season is not None
+    assert row.regular_order_qty == pytest.approx(10 + 100 / 31)
+    assert season.stock_at_arrival == pytest.approx(20 - row.regular_order_qty)
+    assert season.order_qty == pytest.approx(120 - season.stock_at_arrival)
+
+
+def test_late_seasonal_order_below_one_multiple_is_not_recommended(export):
+    _seasonal_export(export, "2026-07-01")
+    orders = export / "purchase_orders.csv"
+    orders.write_text(orders.read_text(encoding="utf-8").replace(",10,10,10,0", ",100,100,100,0"), encoding="utf-8")
+
+    row, = plan(export).recommendations
+    season = row.seasonal_order
+    assert season is not None
+    assert 75 < season.order_qty < 100
+    assert season.status == "Не рекомендуется"
+    assert row.order_qty == 0
+
+
+def test_ordinary_order_covers_demand_just_after_a_season(export):
+    _seasonal_export(export, "2026-07-01")
+    orders = export / "purchase_orders.csv"
+    orders.write_text(
+        orders.read_text(encoding="utf-8").replace("2025-07-31", "2025-09-29"), encoding="utf-8",
+    )
+    row, = plan(export).recommendations
+    season = row.seasonal_order
+    assert season is not None and season.actionable
+    assert row.regular_order_date == date(2026, 9, 2)
+    assert row.regular_order_qty == pytest.approx(30 - season.stock_at_season_end)
+
+
+def test_open_seasonal_batch_keeps_its_full_coverage_after_deadline(export):
+    _seasonal_export(export, "2026-06-03")
+    before, = plan(export).recommendations
+    assert before.order_qty == pytest.approx(150)
+
+    (export / "export_meta.json").write_text('{"cutoff_date":"2026-07-01"}', encoding="utf-8")
+    with (export / "purchase_orders.csv").open("a", encoding="utf-8") as source:
+        source.write("PO-3,SKU-1,SUP-1,import,2026-06-03,2026-10-01,100,open,150,150,0,150\n")
+    after, = plan(export).recommendations
+    assert after.in_transit == 150
+    assert after.excess_threshold == pytest.approx(160)
+    assert not after.excess
+
+
+def test_long_lead_recommended_batch_does_not_become_excess(export):
+    (export / "export_meta.json").write_text('{"cutoff_date":"2026-03-01"}', encoding="utf-8")
+    sales = export / "sales_monthly.csv"
+    sales.write_text(
+        sales.read_text(encoding="utf-8").splitlines()[0] + "\n"
+        + "".join(
+            f"SKU-1,tools,2025-{month:02},{monthrange(2025, month)[1]},0,1,30,0\n"
+            for month in range(1, 13)
+        ),
+        encoding="utf-8",
+    )
+    orders = export / "purchase_orders.csv"
+    orders.write_text(
+        orders.read_text(encoding="utf-8").splitlines()[0] + "\n"
+        "PO-1,SKU-1,SUP-1,import,2025-07-04,,180,completed,10,10,10,0\n"
+        "PO-2,SKU-1,SUP-1,import,2025-11-01,,180,completed,10,10,10,0\n",
+        encoding="utf-8",
+    )
+    (export / "backtest.json").write_text(json.dumps({
+        "cutoff": "2026-03-01",
+        "origins": [],
+        "metrics": [],
+        "quantiles": {"Регулярный": {"windows": 1, "p75": 1.5, "p85": 1.5, "p95": 2}},
+    }), encoding="utf-8")
+
+    before = plan(export)
+    assert before.recommendations[0].order_qty == pytest.approx(440)
+    assert before.suppliers[0].order_qty == 440
+    with orders.open("a", encoding="utf-8") as source:
+        source.write("PO-3,SKU-1,SUP-1,import,2026-03-01,2026-09-17,180,open,440,440,0,440\n")
+    after, = plan(export).recommendations
+    assert after.in_transit == 440
+    assert after.excess_threshold == pytest.approx(650)
+    assert not after.excess
 
 
 def test_run_history_compares_the_same_export_and_preserves_parameters(export, tmp_path):
