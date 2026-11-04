@@ -2,6 +2,7 @@ import csv
 import json
 import shutil
 from datetime import date, timedelta
+from math import ceil
 from pathlib import Path
 
 import pytest
@@ -182,6 +183,19 @@ def test_missing_cycle_flags_supplier_and_suppresses_order(export):
     assert not supplier.time_to_order
 
 
+@pytest.mark.parametrize(("order_date", "original", "bounded"), [
+    ("2025-01-01", 365, 120),
+    ("2026-01-08", 7, 30),
+])
+def test_supplier_cycle_is_bounded(export, order_date, original, bounded):
+    with (export / "purchase_orders.csv").open("a", encoding="utf-8") as source:
+        source.write(f"PO-2,SKU-1,SUP-1,import,{order_date},,181,completed,10,10,10,0\n")
+
+    timing = plan(export).suppliers[0].timing
+    assert timing.cycle_days == bounded
+    assert f"цикл ограничен (было {original} дней)" in timing.flags
+
+
 def test_export_to_order_sheet(export):
     facts = plan(export)
     assert facts == plan(export)
@@ -196,16 +210,18 @@ def test_export_to_order_sheet(export):
     workbook = load_workbook(path)
     try:
         header, values, total = list(workbook["Заказ по поставщикам"].values)[-3:]
-        assert header[3:14] == (
-            "Исключено дефицитных месяцев", "Прогноз 2026-08", "Прогноз 2026-09",
-            "Прогноз 2026-10", "Прогноз 2026-11", "Прогноз 2026-12", "Прогноз 2027-01",
-            "Прогноз 2027-02", "Прогноз 2027-03", "Прогноз 2027-04", "Мало данных",
-        )
+        assert header[3:6] == ("Исключено дефицитных месяцев", "Прогноз на горизонт, шт.", "Мало данных")
         assert values[:2] == (row.supplier_id, row.sku_id)
-        assert values[2:13] == pytest.approx((row.order_qty, 0, *row.monthly_forecast))
-        assert values[14:17] == (201, "Вся история заказов + 20 дней", 30)
+        assert values[2:5] == (ceil(row.order_qty), 0, round(sum(row.monthly_forecast)))
+        assert values[6:9] == (201, "Вся история заказов + 20 дней", 30)
+        sales_column = header.index("Продажи за 12 мес, шт.")
+        assert header[sales_column + 1] == "Оценка спроса в год, шт."
+        assert values[sales_column:sales_column + 2] == (920, 240)
+        forecast_header, forecast_row = list(workbook["Прогноз"].values)
+        assert forecast_header[2:] == tuple(f"Прогноз {month:%Y-%m}" for month in facts.forecast_months)
+        assert forecast_row[2:] == tuple(round(qty) for qty in row.monthly_forecast)
         assert total[:2] == ("SUP-1", "Итого")
-        assert total[2] == pytest.approx(row.order_qty)
+        assert total[2] == ceil(row.order_qty)
         assert total[header.index("Пора заказывать у поставщика")] == "Да"
     finally:
         workbook.close()
@@ -516,7 +532,7 @@ def test_missing_cost_uses_share_of_units_and_keeps_known_markup(export, missing
     assert "Проверить себестоимость" in row.sku_flags
 
 
-def test_pilot_export_partitions_every_sku_and_flags_missing_supplier_timing(tmp_path):
+def test_pilot_export_lists_orders_and_flags_missing_supplier_timing(tmp_path):
     directory = Path(__file__).resolve().parents[1]
     facts = plan(directory)
     with (directory / "sku_dim.csv").open(encoding="utf-8", newline="") as source:
@@ -542,7 +558,8 @@ def test_pilot_export_partitions_every_sku_and_flags_missing_supplier_timing(tmp
             name = "Заказ по поставщикам" if segment == Segment.PURCHASE else segment
             data = [row for row in workbook[name].values if row[1] in catalog]
             assert sorted(row[1] for row in data) == sorted(
-                row.sku_id for row in rows.values() if row.segment == segment
+                row.sku_id for row in rows.values()
+                if (row.order_qty > 0 if segment == Segment.PURCHASE else row.segment == segment)
             )
             if segment == Segment.REVIEW:
                 header = next(workbook[name].values)
