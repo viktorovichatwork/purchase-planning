@@ -6,6 +6,7 @@ import pytest
 from openpyxl import load_workbook
 
 from purchase_planning import ExportValidationError, plan, write_report
+from purchase_planning.facts import Segment
 
 
 @pytest.fixture
@@ -198,7 +199,7 @@ def test_export_to_order_sheet(export):
             "Прогноз 2027-02", "Прогноз 2027-03", "Прогноз 2027-04", "Мало данных",
         )
         assert values[:2] == (row.supplier_id, row.sku_id)
-        assert values[2:13] == pytest.approx((row.order_qty, 29, *row.monthly_forecast))
+        assert values[2:13] == pytest.approx((row.order_qty, 0, *row.monthly_forecast))
         assert values[14:17] == (201, "Вся история заказов + 20 дней", 30)
         assert total[:2] == ("SUP-1", "Итого")
         assert total[2] == pytest.approx(row.order_qty)
@@ -385,6 +386,8 @@ def test_analog_forecast_uses_category_and_price_decile_and_respects_own_level(
     )
     assert rows["SKU-4"].low_data is low_data
     assert not rows["SKU-2"].low_data
+    assert rows["SKU-4"].segment == (Segment.DEAD if months_with_stock else Segment.CONDITIONAL)
+    assert rows["SKU-4"].is_new is partial_sale
 
 
 def test_malformed_metadata_is_rejected(export):
@@ -421,3 +424,105 @@ def test_rejects_invalid_export_with_all_reasons_and_no_report(export):
     assert "receipts.csv: sku_id вне справочника: 'SKU-999'" in reasons
     assert "supplier_dim.csv: файл пуст" in reasons
     assert not path.exists()
+
+
+def test_sleeping_sku_is_reported_without_an_order(export):
+    sales = export / "sales_monthly.csv"
+    header = sales.read_text(encoding="utf-8").splitlines()[0]
+    sales.write_text(header + "\nSKU-1,tools,2024-07,10,0,1,30,0\n", encoding="utf-8")
+    (export / "stock_monthly.csv").write_text(
+        "sku_id,month,stock_qty\nSKU-1,2024-07,15\n", encoding="utf-8",
+    )
+
+    receipts = export / "receipts.csv"
+    receipts.write_text(receipts.read_text(encoding="utf-8").replace("2026-", "2024-"), encoding="utf-8")
+
+    facts = plan(export)
+    row, = facts.recommendations
+    assert row.segment == "Спящие"
+    assert row.order_qty == 0
+    assert row.excluded_stockout_months == 24
+    assert not facts.suppliers[0].time_to_order
+
+    path = export / "order.xlsx"
+    write_report(facts, path)
+    with path.open("rb") as report:
+        workbook = load_workbook(report)
+        assert list(workbook["Спящие"].values)[1][:3] == ("SUP-1", "SKU-1", 0)
+        assert all("SKU-1" not in values for values in workbook["Заказ по поставщикам"].values)
+        workbook.close()
+
+
+@pytest.mark.parametrize(
+    ("markup", "prior_markup", "previous", "segment", "can_order"),
+    [
+        ("24", "24", None, "На пересмотр", False),
+        ("25", "25", None, "Условно к закупке", True),
+        ("27", "24", None, "На пересмотр", False),
+        ("27", "24", "К закупке", "К закупке", True),
+        ("29", "35", "На пересмотр", "На пересмотр", False),
+        ("30", "24", "На пересмотр", "К закупке", True),
+        ("", "35", None, "На пересмотр", False),
+    ],
+)
+def test_segment_uses_markup_priority_and_hysteresis(export, markup, prior_markup, previous, segment, can_order):
+    sales = export / "sales_monthly.csv"
+    header = sales.read_text(encoding="utf-8").splitlines()[0]
+    sales.write_text(
+        header + "\n"
+        f"SKU-1,tools,2025-06,10,0,1,{prior_markup},0\n"
+        f"SKU-1,tools,2026-07,30,4,1,{markup},0\n",
+        encoding="utf-8",
+    )
+    orders = export / "purchase_orders.csv"
+    orders.write_text(
+        orders.read_text(encoding="utf-8").replace(",181,completed", ",400,completed"), encoding="utf-8",
+    )
+    stock = export / "stock_monthly.csv"
+    stock.write_text(stock.read_text(encoding="utf-8").replace("2026-08,25", "2026-08,0"), encoding="utf-8")
+
+    previous_segments = None if previous is None else {"SKU-1": Segment(previous)}
+    row, = plan(export, previous_segments=previous_segments).recommendations
+    assert row.segment == segment
+    assert (row.order_qty > 0) == can_order
+    assert "Возвраты > 10%" in row.sku_flags
+    assert ("Проверить себестоимость" in row.sku_flags) == (markup == "")
+    assert not row.is_new
+
+
+def test_pilot_export_partitions_every_sku_and_flags_missing_supplier_timing(tmp_path):
+    directory = Path(__file__).resolve().parents[1]
+    facts = plan(directory)
+    with (directory / "sku_dim.csv").open(encoding="utf-8", newline="") as source:
+        catalog = {row["sku_id"]: row for row in csv.DictReader(source)}
+    rows = {row.sku_id: row for row in facts.recommendations}
+    assert len(facts.recommendations) == len(rows) == len(catalog) == 791
+    assert rows.keys() == catalog.keys()
+    unknown = [row for row in rows.values() if catalog[row.sku_id]["supply_type"] == "unknown"]
+    assert len(unknown) == 153
+    assert all(row.order_qty == 0 and "Поставщик не указан" in row.sku_flags for row in unknown)
+    missing_lead = {summary.supplier_id for summary in facts.suppliers if summary.timing.lead_days is None}
+    assert missing_lead
+    assert all(
+        row.order_qty == 0 and "Не определено плечо поставки" in row.sku_flags
+        for row in rows.values() if row.supplier_id in missing_lead
+    )
+
+    path = tmp_path / "order.xlsx"
+    write_report(facts, path)
+    workbook = load_workbook(path, read_only=True)
+    try:
+        for segment in Segment:
+            name = "Заказ по поставщикам" if segment == Segment.PURCHASE else segment
+            data = [row for row in workbook[name].values if row[1] in catalog]
+            assert sorted(row[1] for row in data) == sorted(
+                row.sku_id for row in rows.values() if row.segment == segment
+            )
+            if segment == Segment.REVIEW:
+                header = next(workbook[name].values)
+                sales = [row[header.index("Продажи за 12 мес, шт.")] for row in data]
+                assert sales == sorted(sales, reverse=True)
+            if segment in {Segment.DEAD, Segment.SLEEPING, Segment.REVIEW}:
+                assert all(row[2] == 0 for row in data)
+    finally:
+        workbook.close()

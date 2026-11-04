@@ -5,7 +5,7 @@ from pathlib import Path
 from openpyxl import Workbook
 from openpyxl.styles import Font
 
-from purchase_planning.facts import PlanFacts
+from purchase_planning.facts import PlanFacts, Segment
 
 
 def write_report(
@@ -31,30 +31,49 @@ def write_report(
         "Мало данных", "Плечо, дней", "Источник плеча", "Цикл, дней",
         "Остаток на дату расчёта", "Дата прихода нового заказа", "Остаток на дату прихода",
         "В пути по месяцам", "Флаги заказов", "Флаги поставщика", "Пора заказывать у поставщика",
+        "Сегмент", "Новинка", "Наценка за 12 мес, %", "Продажи за 12 мес, шт.", "Флаги SKU",
     )
     sheet.append(headers)
     summaries = {supplier.supplier_id: supplier for supplier in facts.suppliers}
-    rows = sorted(facts.recommendations, key=lambda row: row.supplier_id)
+    segment_sheets = {Segment.PURCHASE: sheet}
+    for segment in Segment:
+        if segment != Segment.PURCHASE:
+            segment_sheets[segment] = workbook.create_sheet(segment)
+            segment_sheets[segment].append(headers)
+    review = sorted(
+        (row for row in facts.recommendations if row.segment == Segment.REVIEW),
+        key=lambda row: (-row.sales_qty_12m, row.sku_id),
+    )
+    rows = sorted(
+        (row for row in facts.recommendations if row.segment != Segment.REVIEW),
+        key=lambda row: row.supplier_id,
+    )
+    rows.extend(review)
     for supplier, group in groupby(rows, key=lambda row: row.supplier_id):
         summary = summaries.get(supplier)
         timing = summary.timing if summary else None
         supplier_name = supplier or "Поставщик не указан"
+        has_order_rows = False
         for row in group:
+            target = segment_sheets[row.segment]
+            has_order_rows |= row.segment == Segment.PURCHASE
             transit = ", ".join(f"{month:%Y-%m} — {quantity:g}" for month, quantity in row.in_transit_by_month)
-            sheet.append((
+            target.append((
                 supplier_name, row.sku_id, row.order_qty, row.excluded_stockout_months,
                 *row.monthly_forecast, "Да" if row.low_data else None,
                 timing.lead_days if timing else None, timing.lead_source if timing else None,
                 timing.cycle_days if timing else None, row.stock_at_calculation,
                 row.arrival_date.isoformat() if row.arrival_date else None, row.stock_at_arrival,
-                transit or None, ", ".join(row.order_flags) or None,
+                transit or None, ", ".join(row.order_flags) or None, None, None,
+                row.segment, "Да" if row.is_new else None, row.markup_pct_12m, row.sales_qty_12m,
+                ", ".join(row.sku_flags) or None,
             ))
-            for cell in sheet[sheet.max_row][:2]:
+            for cell in target[target.max_row][:2]:
                 cell.data_type = "s"
-        if summary is not None:
+        if summary is not None and has_order_rows:
             sheet.append((
                 supplier_name, "Итого", summary.order_qty,
-                *([None] * (len(headers) - 5)),
+                *([None] * (headers.index("Флаги поставщика") - 3)),
                 ", ".join(summary.timing.flags) or None, "Да" if summary.time_to_order else "Нет",
             ))
             sheet.cell(sheet.max_row, 1).data_type = "s"
