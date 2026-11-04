@@ -129,6 +129,7 @@ def plan(
 def calculate(
     data_dir: str | Path, as_of: date | None = None, *,
     previous_segments: Mapping[str, Segment] | None = None,
+    backtest_dir: Path | None = None,
 ) -> Calculation:
     directory = Path(data_dir)
     tables = read_export(directory)
@@ -141,7 +142,7 @@ def calculate(
     calculation_date = cutoff if as_of is None else as_of
     if calculation_date > cutoff:
         raise ExportValidationError(["Дата расчёта позже даты среза."])
-    backtest, backtest_warning = read_backtest(directory, calculation_date)
+    backtest, backtest_warning = read_backtest(backtest_dir or directory, calculation_date)
 
     sku_rows = tables["sku_dim"]
     if calculation_date < cutoff:

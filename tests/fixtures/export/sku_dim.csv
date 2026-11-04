@@ -1,0 +1,2 @@
+sku_id,category,brand_id,supplier_id,supply_type,uom,weight_kg,warranty_months,target_cover_days,price_decile,first_sale_month,last_sale_month,months_with_sales,qty_total,avg_markup_pct_12m,on_order_qty,created
+SKU-1,tools,BRD-1,SUP-1,import,pcs,,0,0,1,2026-06,2026-08,3,920,30,0,2026-06

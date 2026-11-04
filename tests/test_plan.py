@@ -17,37 +17,8 @@ from purchase_planning.runs import run_plan
 
 @pytest.fixture
 def export(tmp_path):
-    tables = {
-        "sku_dim": (
-            "sku_id,category,brand_id,supplier_id,supply_type,uom,weight_kg,warranty_months,"
-            "target_cover_days,price_decile,first_sale_month,last_sale_month,months_with_sales,"
-            "qty_total,avg_markup_pct_12m,on_order_qty,created\n"
-            "SKU-1,tools,BRD-1,SUP-1,import,pcs,,0,0,1,2026-06,2026-08,3,920,30,0,2026-06\n"
-        ),
-        "sales_monthly": (
-            "sku_id,category,month,qty_sold,qty_returned,orders_cnt,markup_pct,partial_month\n"
-            "SKU-1,tools,2026-06,10,0,1,30,0\n"
-            "SKU-1,tools,2026-07,30,0,1,30,0\n"
-            "SKU-1,tools,2026-08,880,0,1,30,1\n"
-        ),
-        "stock_monthly": "sku_id,month,stock_qty\nSKU-1,2026-07,15\nSKU-1,2026-08,25\n",
-        "purchase_orders": (
-            "po_id,sku_id,supplier_id,supply_type,order_date,promised_date,planned_lead_days,"
-            "status,qty_ordered,qty_confirmed,qty_received,qty_pending\n"
-            "PO-1,SKU-1,SUP-1,import,2026-01-01,2026-07-01,181,completed,10,10,10,0\n"
-        ),
-        "receipts": (
-            "sku_id,receipt_date,qty,supplier_id,supply_type\n"
-            "SKU-1,2026-06-01,10,SUP-1,import\nSKU-1,2026-07-01,10,SUP-1,import\n"
-        ),
-        "supplier_dim": (
-            "supplier_id,supply_type,receipts_cnt,skus,median_days_between_receipts,"
-            "median_planned_lead_days\nSUP-1,import,1,1,,181\n"
-        ),
-    }
-    for name, contents in tables.items():
-        (tmp_path / f"{name}.csv").write_text(contents, encoding="utf-8")
-    (tmp_path / "export_meta.json").write_text('{"cutoff_date":"2026-08-13"}', encoding="utf-8")
+    for source in (Path(__file__).parent / "fixtures" / "export").iterdir():
+        shutil.copyfile(source, tmp_path / source.name)
     return tmp_path
 
 
@@ -72,6 +43,51 @@ def test_forecast_starts_after_cutoff_and_uses_actual_sales_and_receipts_through
     assert row.monthly_forecast[-1] == pytest.approx(20 * 6 / 30)
     assert row.stock_at_calculation == 15
     assert row.stock_at_arrival == 0
+
+
+def test_publication_retains_history_and_rejects_bad_exports(export, monkeypatch):
+    monkeypatch.setenv("PURCHASE_CODE_REVISION", "code-sha")
+    monkeypatch.setenv("GITHUB_SHA", "export-sha")
+    monkeypatch.setenv("GITHUB_RUN_ID", "1")
+    history = export / "runs"
+
+    def publish(name, *options):
+        return subprocess.run(
+            [sys.executable, "-m", "purchase_planning.runs", str(export), "--stub-llm",
+             "--history-dir", str(history), "--site-dir", str(export / name), *options],
+            capture_output=True,
+        )
+
+    first = publish("site-1", "--reject-duplicate")
+    assert first.returncode == 0, first.stderr
+    assert publish("site-retry", "--reject-duplicate").returncode == 0
+    assert len(list(history.iterdir())) == 1
+
+    monkeypatch.setenv("GITHUB_RUN_ID", "2")
+    duplicate = publish("site-duplicate", "--reject-duplicate")
+    assert duplicate.returncode != 0
+    assert not (export / "site-duplicate").exists()
+
+    second = publish("site-2")
+    assert second.returncode == 0, second.stderr
+    site = export / "site-2"
+    assert 'href="000001/index.html"' in (site / "history.html").read_text(encoding="utf-8")
+    assert (site / "000001" / "report.xlsx").is_file()
+    page = (site / "index.html").read_text(encoding="utf-8")
+    assert '<time datetime="2026-08-13">' in page
+    assert "Изменений нет." in page
+    assert "Пояснение LLM" not in page
+    metadata = json.loads((history / "000002" / "run.json").read_text(encoding="utf-8"))
+    assert (metadata["source_revision"], metadata["code_revision"]) == ("export-sha", "code-sha")
+    assert len(metadata["input_sha256"]) == 64
+
+    monkeypatch.setenv("GITHUB_RUN_ID", "3")
+    (export / "sales_monthly.csv").write_text("", encoding="utf-8")
+    bad_export = publish("site-invalid", "--reject-duplicate")
+    assert bad_export.returncode != 0
+    assert not (export / "site-invalid").exists()
+    assert not (history / "000003").exists()
+    assert (site / "index.html").read_text(encoding="utf-8") == page
 
 
 @pytest.mark.parametrize(
@@ -313,7 +329,7 @@ def test_saved_backtest_excludes_stockouts_and_calibrates_the_order(export):
         assert row[2] == total[2] == 100
     finally:
         workbook.close()
-    assert "57.14%" in (run / "index.html").read_text(encoding="utf-8")
+    assert "57,1%" in (run / "index.html").read_text(encoding="utf-8")
 
 
 def test_missing_metadata_uses_last_complete_month_and_warns_in_report(export):

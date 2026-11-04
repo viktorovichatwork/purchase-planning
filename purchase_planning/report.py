@@ -9,7 +9,9 @@ from openpyxl.worksheet.worksheet import Worksheet
 
 from purchase_planning.calibration import METRIC_HEADERS, stock_multiplier
 from purchase_planning.facts import OrderFlag, PlanFacts, Recommendation, Segment
-from purchase_planning.order_sheet import displayed_order_qty, order_date_label, rounded_quantity, supplier_orders
+from purchase_planning.order_sheet import (
+    displayed_order_qty, excess_rows, order_date_label, rounded_quantity, stockout_rows, supplier_orders,
+)
 from purchase_planning.parameters import STALE_EXPORT_DAYS, run_parameters
 from purchase_planning.replenishment import inventory_summary
 
@@ -86,7 +88,7 @@ def write_report(
             round(row.sales_qty_12m), round(row.annual_demand_qty), ", ".join(row.sku_flags) or None,
             row.target_stock, row.safety_stock,
             row.demand_type, row.order_qty, row.order_multiple,
-            row.coverage_months if row.coverage_months is not None else "Нет прогноза",
+            round(row.coverage_months, 1) if row.coverage_months is not None else "Нет прогноза",
             _stock_until_label(row),
             order_date_label(row.order_by, facts.as_of) if row.order_by else None,
             order_date_label(summary.next_order_date, facts.as_of) if summary and summary.next_order_date else None,
@@ -102,8 +104,8 @@ def write_report(
         for header in ("Остаток на дату прихода", "Целевой запас", "Страховой запас"):
             target.cell(target.max_row, headers.index(header) + 1).number_format = "0"
         target.cell(target.max_row, headers.index("Наценка за 12 мес, %") + 1).number_format = "0.0"
-        target.cell(target.max_row, headers.index("К заказу до округления, шт.") + 1).number_format = "0.00"
-        target.cell(target.max_row, headers.index("Покрытие, мес") + 1).number_format = "0.00"
+        target.cell(target.max_row, headers.index("К заказу до округления, шт.") + 1).number_format = "0"
+        target.cell(target.max_row, headers.index("Покрытие, мес") + 1).number_format = "0.0"
 
     for supplier, group, total in supplier_orders(facts):
         for row in group:
@@ -124,10 +126,10 @@ def write_report(
     for row in sorted(facts.recommendations, key=lambda row: (row.supplier_id, row.sku_id)):
         forecast_sheet.append((
             row.supplier_id or "Поставщик не указан", row.sku_id, *(round(qty) for qty in row.monthly_forecast),
-            row.coverage_months if row.coverage_months is not None else "Нет прогноза",
+            round(row.coverage_months, 1) if row.coverage_months is not None else "Нет прогноза",
             _stock_until_label(row), order_date_label(row.order_by, facts.as_of) if row.order_by else None,
         ))
-        forecast_sheet.cell(forecast_sheet.max_row, 3 + len(facts.forecast_months)).number_format = "0.00"
+        forecast_sheet.cell(forecast_sheet.max_row, 3 + len(facts.forecast_months)).number_format = "0.0"
         for cell in forecast_sheet[forecast_sheet.max_row][:2]:
             cell.data_type = "s"
         if row.segment not in {Segment.PURCHASE, Segment.REVIEW}:
@@ -148,6 +150,12 @@ def write_report(
     parameter_sheet.append(("Дата запуска", run_date.isoformat()))
     for name, value in (run_parameters() if parameters is None else parameters).items():
         parameter_sheet.append((name, value))
+        if isinstance(value, (int, float)):
+            cell = parameter_sheet.cell(parameter_sheet.max_row, 2)
+            if "%" in name or "мес" in name:
+                cell.number_format = "0.0"
+            elif name.startswith(("Минимальная доля", "Максимальная доля", "Порог отсутствующей", "Порог флага возвратов")):
+                cell.number_format = "0.0%"
     parameter_sheet.column_dimensions["A"].width = 60
     parameter_sheet.column_dimensions["B"].width = 115
     workbook.save(path)
@@ -181,34 +189,30 @@ def _append_inventory_sheets(workbook: Workbook, facts: PlanFacts) -> None:
         seasonal.append((
             row.sku_id, row.supplier_id, row.category, season.window_start.isoformat(), season.window_end.isoformat(),
             season.deadline.isoformat(), season.days_late, row.arrival_date.isoformat() if row.arrival_date else None,
-            round(season.months_remaining, 2), rounded_quantity(season.order_qty, row.order_multiple),
-            rounded_quantity(season.ordinary_service_qty, row.order_multiple), round(season.stock_at_season_end, 2),
+            round(season.months_remaining, 1), rounded_quantity(season.order_qty, row.order_multiple),
+            rounded_quantity(season.ordinary_service_qty, row.order_multiple), round(season.stock_at_season_end),
             season.next_deadline.isoformat(), season.status,
             "Рассмотреть ускоренную доставку" if season.expedite else None,
-            round(season.order_qty, 2), row.order_multiple,
-            round(season.stock_at_arrival, 2), round(season.target_stock, 2), round(season.safety_stock, 2),
+            round(season.order_qty), row.order_multiple,
+            round(season.stock_at_arrival), round(season.target_stock), round(season.safety_stock),
         ))
+        seasonal.cell(seasonal.max_row, 9).number_format = "0.0"
 
-    for row in sorted(
-        (row for row in facts.recommendations if row.excess),
-        key=lambda row: (-(row.coverage_months or 0) * (row.price_decile or 0), row.sku_id),
-    ):
+    for row in excess_rows(facts):
         excess.append((
-            row.sku_id, row.supplier_id, row.category, row.stock_at_calculation, row.in_transit,
-            row.coverage_months, row.price_decile, row.excess_threshold,
+            row.sku_id, row.supplier_id, row.category, round(row.stock_at_calculation), round(row.in_transit),
+            round(row.coverage_months, 1) if row.coverage_months is not None else None,
+            row.price_decile, round(row.excess_threshold) if row.excess_threshold is not None else None,
             OrderFlag.RESCHEDULE if OrderFlag.RESCHEDULE in row.order_flags else None,
         ))
-        excess.cell(excess.max_row, 6).number_format = "0.00"
+        excess.cell(excess.max_row, 6).number_format = "0.0"
 
-    for row in sorted(
-        (row for row in facts.recommendations if row.stockout_risk),
-        key=lambda row: (row.stock_until or date.max, row.sku_id),
-    ):
+    for row in stockout_rows(facts):
         risks.append((
-            row.sku_id, row.supplier_id, row.stock_at_calculation, row.in_transit,
+            row.sku_id, row.supplier_id, round(row.stock_at_calculation), round(row.in_transit),
             row.stock_until.isoformat() if row.stock_until else None,
             row.arrival_date.isoformat() if row.arrival_date else None,
-            row.stockout_days, round(row.lost_sales, 2),
+            row.stockout_days, round(row.lost_sales),
         ))
     for sheet in (seasonal, excess, risks):
         sheet.freeze_panes = "C2"
@@ -232,7 +236,7 @@ def _append_backtest(sheet: Worksheet, facts: PlanFacts) -> None:
     for row in result.metrics:
         sheet.append((row.breakdown, row.group, row.windows, row.wape, row.bias, row.baseline_wape, row.baseline_bias))
         for cell in sheet[sheet.max_row][3:]:
-            cell.number_format = "0.00%"
+            cell.number_format = "0.0%"
     sheet.append(())
     sheet.append(("Тип спроса", "Окон с отношением", "p75", "p85", "p95", "Множитель", "Множитель для сезонной категории"))
     for group, values in result.quantiles.items():

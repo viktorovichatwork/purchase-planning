@@ -1,0 +1,100 @@
+name: План закупок и Pages
+
+on:
+  push:
+    branches: [main]
+    paths: ["inbox/*.csv", "inbox/export_meta.json"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: purchase-planning-pages
+  queue: max
+
+jobs:
+  calculate:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install .
+      - name: Рассчитать и собрать сайт
+        env:
+          EXPLABS_API_KEY: ${{ secrets.EXPLABS_API_KEY }}
+          EXPLABS_MODEL: ${{ vars.EXPLABS_MODEL }}
+        run: |
+          set -euo pipefail
+          export PURCHASE_CODE_REVISION="$(git rev-parse HEAD)"
+          mkdir -p "$RUNNER_TEMP/export/inbox"
+          if git cat-file -e "$GITHUB_SHA:inbox"; then
+            git archive "$GITHUB_SHA" inbox | tar -x -C "$RUNNER_TEMP/export"
+          fi
+          options=()
+          if [[ "$GITHUB_EVENT_NAME" == push ]]; then
+            options+=(--reject-duplicate)
+          fi
+          python -m purchase_planning.runs "$RUNNER_TEMP/export/inbox" \
+            --history-dir runs --site-dir "$RUNNER_TEMP/site" --refresh-backtest "${options[@]}"
+      - name: Сохранить историю
+        run: |
+          git add -- runs/
+          if ! git diff --cached --quiet; then
+            git -c user.name='github-actions[bot]' \
+                -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
+                commit -m "Сохранить расчёт закупок ($GITHUB_RUN_ID)"
+            # A user can upload the next export while the current one is calculating.
+            if ! git push origin HEAD:main; then
+              git -c user.name='github-actions[bot]' \
+                  -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
+                  pull --rebase origin main
+              git push origin HEAD:main
+            fi
+          fi
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: ${{ runner.temp }}/site
+
+  deploy:
+    needs: calculate
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/deploy-pages@v4
+        id: deployment
+      - uses: actions/download-artifact@v4
+        with:
+          name: github-pages
+      - name: Проверить опубликованную дату среза
+        env:
+          PAGE_URL: ${{ steps.deployment.outputs.page_url }}
+        run: |
+          set -euo pipefail
+          tar -xf artifact.tar ./index.html
+          grep -F '<time datetime="' index.html
+          for attempt in {1..12}; do
+            if curl --fail --silent --show-error --location --compressed --max-time 15 \
+              "${PAGE_URL%/}/?run=${GITHUB_RUN_ID}&attempt=${attempt}" -o published.html \
+              && cmp -s index.html published.html; then
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "::error::Pages не вернул дашборд с ожидаемой датой среза."
+          exit 1

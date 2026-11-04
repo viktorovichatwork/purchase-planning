@@ -38,3 +38,17 @@ def supplier_orders(facts: PlanFacts) -> list[tuple[str, list[Recommendation], i
         lines = list(group)
         orders.append((supplier, lines, sum(displayed_order_qty(row) for row in lines)))
     return orders
+
+
+def stockout_rows(facts: PlanFacts) -> list[Recommendation]:
+    return sorted(
+        (row for row in facts.recommendations if row.stockout_risk),
+        key=lambda row: (row.stock_until or date.max, -row.lost_sales, row.sku_id),
+    )
+
+
+def excess_rows(facts: PlanFacts) -> list[Recommendation]:
+    return sorted(
+        (row for row in facts.recommendations if row.excess),
+        key=lambda row: (-(row.coverage_months or 0) * (row.price_decile or 0), row.sku_id),
+    )
