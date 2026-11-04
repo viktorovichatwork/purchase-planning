@@ -10,7 +10,9 @@ from pathlib import Path
 from purchase_planning.calibration import read_backtest
 from purchase_planning.demand import apply_analog_levels, category_profiles, estimate_sku_demand
 from purchase_planning.export import ExportValidationError, finite_quantity, read_export
-from purchase_planning.facts import DemandType, OrderFlag, PlanFacts, Recommendation, Segment, SupplierSummary
+from purchase_planning.facts import (
+    ESTIMATED_CUTOFF_SOURCE, DemandType, OrderFlag, PlanFacts, Recommendation, Segment, SupplierSummary,
+)
 from purchase_planning.inventory import forecast_period, project_stock
 from purchase_planning.order_sheet import displayed_order_qty
 from purchase_planning.replenishment import InventoryPlan, SeasonalBatch, matching_seasonal_batch, plan_inventory
@@ -43,16 +45,51 @@ def _complete_stock_months(as_of: date, partial_months: set[date]) -> tuple[date
     return tuple(months)
 
 
+def _estimate_cutoff(
+    monthly_totals: dict[int, float], complete_months: set[int], partial_month: date,
+) -> date | None:
+    month = month_index(partial_month)
+    recent_months = sorted(complete_months)[-2:]
+    prior_months = {month - 12, *(recent - 12 for recent in recent_months)}
+    if len(recent_months) != 2 or not prior_months.issubset(complete_months):
+        return None
+
+    prior_recent = fsum(monthly_totals[recent - 12] for recent in recent_months)
+    if prior_recent <= 0:
+        return None
+    growth = fsum(monthly_totals[recent] for recent in recent_months) / prior_recent
+    expected = monthly_totals[month - 12] * growth
+    if expected <= 0:
+        return None
+    days = partial_month.day
+    day = round(days * monthly_totals[month] / expected)
+    return partial_month.replace(day=max(1, min(day, days - 1)))
+
+
 def _read_cutoff(
-    path: Path, complete_months: list[date], orders: list[PurchaseLine], receipts: list[Receipt],
+    path: Path, sales_rows: list[tuple[str, Sale]], partial_months: set[date],
+    orders: list[PurchaseLine], receipts: list[Receipt],
 ) -> tuple[date, str]:
     try:
         contents = path.read_text(encoding="utf-8-sig")
     except FileNotFoundError:
+        complete_months = {sale.month for _, sale in sales_rows} - partial_months
+        latest_receipt = max((receipt.received for receipt in receipts), default=None)
+        latest_order = max((line.placed for line in orders), default=None)
+        last_month = max(complete_months | partial_months, default=None)
+        if last_month is not None and last_month in partial_months:
+            monthly_totals: dict[int, float] = defaultdict(float)
+            for _, sale in sales_rows:
+                monthly_totals[month_index(sale.month)] += sale.quantity
+            estimate = _estimate_cutoff(monthly_totals, {month_index(month) for month in complete_months}, last_month)
+            if estimate is not None:
+                cutoff = max(day for day in (estimate, latest_receipt, latest_order) if day is not None)
+                return cutoff, ESTIMATED_CUTOFF_SOURCE
+
         candidates = (
             (max(complete_months, default=None), "по последнему полному месяцу продаж"),
-            (max((receipt.received for receipt in receipts), default=None), "по последнему приходу"),
-            (max((line.placed for line in orders), default=None), "по последнему заказу"),
+            (latest_receipt, "по последнему приходу"),
+            (latest_order, "по последнему заказу"),
         )
         latest = max(((day, source) for day, source in candidates if day is not None), key=lambda item: item[0], default=None)
         if latest is None:
@@ -142,9 +179,7 @@ def calculate(
     order_history, receipt_history = read_supply_history(tables)
 
     cutoff, cutoff_source = _read_cutoff(
-        directory / "export_meta.json",
-        [sale.month for _, sale in sales_rows if sale.month not in partial_months],
-        order_history, receipt_history,
+        directory / "export_meta.json", sales_rows, partial_months, order_history, receipt_history,
     )
     calculation_date = cutoff if as_of is None else as_of
     if calculation_date > cutoff:
@@ -162,7 +197,8 @@ def calculate(
     know_month_sales = calculation_date == cutoff or (
         calculation_date == stock_month and stock_month not in partial_months
     )
-    sales: dict[tuple[str, date], float] = defaultdict(float)
+    net_sales: dict[tuple[str, date], float] = defaultdict(float)
+    gross_sales: dict[tuple[str, date], float] = defaultdict(float)
     month_sales: dict[str, float] = defaultdict(float)
     first_sales: dict[str, date] = {}
     sales_by_sku: dict[str, list[Sale]] = defaultdict(list)
@@ -171,7 +207,8 @@ def calculate(
             continue
         month, quantity = sale.month, sale.quantity
         if month <= calculation_date and month not in partial_months:
-            sales[sku, month] += quantity
+            net_sales[sku, month] += sale.net_quantity
+            gross_sales[sku, month] += quantity
         if month == stock_month and know_month_sales:
             month_sales[sku] += quantity
         # A sale through the export cutoff is known even in an incomplete month.
@@ -180,10 +217,12 @@ def calculate(
             if quantity > 0:
                 first_sales[sku] = min(first_sales.get(sku, month), month)
 
-    profiles = category_profiles(sku_categories, sales)
+    profiles = category_profiles(sku_categories, net_sales)
     history_months = _complete_stock_months(calculation_date, partial_months)
     own_demand = {
-        sku: estimate_sku_demand(sku, profiles[category], history_months, sales, stock, first_sales.get(sku))
+        sku: estimate_sku_demand(
+            sku, profiles[category], history_months, net_sales, gross_sales, stock, first_sales.get(sku),
+        )
         for sku, category in sku_categories.items()
     }
     demand_by_sku = apply_analog_levels(sku_rows, own_demand, set(first_sales))
@@ -306,6 +345,7 @@ def calculate(
         cutoff, calculation_date, tuple(
             replace(row, monthly_forecast=tuple(forecast.get(month, 0.0) for month in forecast_months))
             for row, forecast in sku_plans
-        ), cutoff_source, forecast_months, tuple(profiles.values()), tuple(suppliers), supply_warning, backtest, backtest_warning,
+        ), cutoff_source, forecast_months, tuple(profiles.values()), tuple(suppliers), supply_warning, backtest,
+        backtest_warning, unconfirmed_order_lines=sum(line.is_unconfirmed for line in open_lines),
     )
     return Calculation(facts, sales_by_sku, receipts, orders)

@@ -12,7 +12,10 @@ import pytest
 from openpyxl import load_workbook
 
 from purchase_planning import ExportValidationError, plan, write_report
-from purchase_planning.facts import Segment
+from purchase_planning.backtest import run_backtest
+from purchase_planning.dashboard import write_dashboard
+from purchase_planning.facts import OrderFlag, Segment
+from purchase_planning.planner import calculate
 from purchase_planning.runs import run_plan
 
 
@@ -193,6 +196,23 @@ def test_open_orders_respect_arrival_and_overdue_boundaries(export):
     assert row.stockout_risk
 
 
+def test_unconfirmed_open_order_lines_stay_in_transit_and_are_counted(export):
+    with (export / "purchase_orders.csv").open("a", encoding="utf-8") as source:
+        source.write(
+            "PO-2,SKU-1,SUP-1,import,2026-06-01,2026-10-01,122,open,100,0,0,100\n"
+            "PO-3,SKU-1,SUP-1,import,2026-06-01,2026-10-01,122,open,150,0,0,150\n"
+            "PO-4,SKU-1,SUP-1,import,2026-06-01,2026-10-01,122,open,200,200,0,200\n"
+            "PO-5,SKU-1,SUP-1,import,2026-06-01,2026-10-01,122,closed,200,0,0,200\n"
+        )
+
+    calculation = calculate(export)
+    assert {line.po_id for line in calculation.orders if line.is_unconfirmed} == {"PO-2", "PO-3"}
+    assert calculation.facts.unconfirmed_order_lines == 2
+    row = calculation.facts.recommendations[0]
+    assert OrderFlag.UNCONFIRMED in row.order_flags
+    assert row.in_transit == 450
+
+
 def test_missing_cycle_flags_supplier_and_suppresses_order(export):
     (export / "receipts.csv").write_text(
         "sku_id,receipt_date,qty,supplier_id,supply_type\nSKU-1,2026-07-01,10,SUP-1,import\n",
@@ -339,6 +359,27 @@ def test_saved_backtest_excludes_stockouts_and_calibrates_the_order(export):
     assert "57,1%" in (run / "index.html").read_text(encoding="utf-8")
 
 
+def test_backtest_scores_net_sales_without_excluding_fully_returned_month(export):
+    (export / "export_meta.json").write_text('{"cutoff_date":"2026-10-01"}', encoding="utf-8")
+    sales = export / "sales_monthly.csv"
+    sales.write_text(
+        sales.read_text(encoding="utf-8").replace("2026-07,30,0", "2026-07,30,30")
+        .replace("880,0,1,30,1", "40,0,1,30,0"),
+        encoding="utf-8",
+    )
+    (export / "stock_monthly.csv").write_text("sku_id,month,stock_qty\nSKU-1,2026-08,25\n", encoding="utf-8")
+    with (export / "purchase_orders.csv").open("a", encoding="utf-8") as source:
+        source.write("PO-2,SKU-1,SUP-1,import,2026-01-31,,-20,completed,50,50,50,0\n")
+    orders = export / "purchase_orders.csv"
+    orders.write_text(orders.read_text(encoding="utf-8").replace("2026-07-01,181", ",-20"), encoding="utf-8")
+
+    metric = next(row for row in run_backtest(export).metrics if row.breakdown == row.group == "Все")
+    # The 30-day windows compare forecasts of 10 and 5 to net sales of 0 and 40, scaled by 30/31.
+    assert metric.windows == 2
+    assert metric.wape == pytest.approx(45 / 40)
+    assert metric.bias == pytest.approx(-25 / 40)
+
+
 def test_missing_metadata_uses_last_complete_month_and_reports_source(export):
     (export / "export_meta.json").unlink()
     facts = plan(export)
@@ -391,6 +432,72 @@ def test_cutoff_uses_latest_observed_activity_unless_explicit(export, order_date
     assert row.in_transit == 0
 
 
+@pytest.mark.parametrize(("partial_sales", "receipt_day", "order_day", "metadata_day", "expected_day"), [
+    (26, 1, 1, None, 13),
+    (26, 17, 1, None, 17),
+    (26, 1, 18, None, 18),
+    (0, 1, 1, None, 1),
+    (100, 1, 1, None, 30),
+    (26, 17, 18, 11, 11),
+])
+def test_cutoff_estimates_partial_month_and_respects_observed_dates(
+    export, partial_sales, receipt_day, order_day, metadata_day, expected_day,
+):
+    metadata = export / "export_meta.json"
+    if metadata_day is None:
+        metadata.unlink()
+    else:
+        metadata.write_text(json.dumps({"cutoff_date": f"2026-08-{metadata_day:02}"}), encoding="utf-8")
+    sales = export / "sales_monthly.csv"
+    sales.write_text(sales.read_text(encoding="utf-8").replace(",880,", f",{partial_sales},"), encoding="utf-8")
+    with sales.open("a", encoding="utf-8") as source:
+        source.write(
+            "SKU-1,tools,2025-06,10,0,1,30,0\n"
+            "SKU-1,tools,2025-07,10,0,1,30,0\n"
+            "SKU-1,tools,2025-08,31,10,1,30,0\n"
+        )
+    with (export / "receipts.csv").open("a", encoding="utf-8") as source:
+        source.write(f"SKU-1,2026-08-{receipt_day:02},10,SUP-1,import\n")
+    with (export / "purchase_orders.csv").open("a", encoding="utf-8") as source:
+        source.write(f"PO-2,SKU-1,SUP-1,import,2026-08-{order_day:02},,0,closed,10,0,0,10\n")
+
+    facts = plan(export)
+    assert facts.cutoff == date(2026, 8, expected_day)
+    assert facts.cutoff_is_estimated == (metadata_day is None)
+
+
+def test_full_inbox_cutoff_and_open_orders_with_future_arrivals(tmp_path):
+    directory = Path(__file__).resolve().parents[1] / "inbox"
+    assert not (directory / "export_meta.json").exists()
+    calculation = calculate(directory)
+    facts = calculation.facts
+    assert facts.cutoff == date(2026, 8, 13)
+    future = [
+        line for line in calculation.orders
+        if line.status == "open" and line.promised is not None and line.promised > facts.cutoff
+    ]
+    assert len(future) == 22
+    assert sum(line.pending for line in future) == 17_127
+    assert facts.unconfirmed_order_lines == 54
+    assert sum(row.in_transit for row in facts.recommendations) == 17_637  # Includes 510 overdue units.
+
+    dashboard = tmp_path / "index.html"
+    write_dashboard(facts, dashboard, run_date=date(2026, 11, 4), previous_run=None, changes=[])
+    page = dashboard.read_text(encoding="utf-8")
+    assert '≈ <time datetime="2026-08-13">13.08.2026</time> · оценка по продажам неполного месяца' in page
+    assert "<dt>Не подтверждены поставщиком, строк заказов</dt><dd>54</dd>" in page
+
+    path = tmp_path / "report.xlsx"
+    write_report(facts, path, run_date=date(2026, 11, 4))
+    workbook = load_workbook(path, read_only=True)
+    try:
+        parameters = dict(workbook["Параметры"].values)
+        assert parameters["Дата среза"] == "≈ 13.08.2026 · оценка по продажам неполного месяца"
+        assert dict(workbook["Сводка"].values)["Не подтверждены поставщиком, строк заказов"] == 54
+    finally:
+        workbook.close()
+
+
 def test_csv_with_only_blank_fields_is_rejected(export):
     table = export / "supplier_dim.csv"
     header = table.read_text(encoding="utf-8").splitlines()[0]
@@ -422,6 +529,30 @@ def test_demand_level_uses_complete_months_with_stock_or_sales_from_2024(export)
     # May had stock and no sales. June had sales and no opening stock.
     assert row.monthly_forecast[1] == pytest.approx(40 / 3)
     assert row.excluded_stockout_months == 28
+
+
+def test_net_sales_drive_demand_but_gross_sales_keep_month_and_segment(export):
+    sales = export / "sales_monthly.csv"
+    sales.write_text(
+        sales.read_text(encoding="utf-8").replace("2026-06,10,0", "2026-06,10,20")
+        .replace("2026-07,30,0", "2026-07,30,10"),
+        encoding="utf-8",
+    )
+    with sales.open("a", encoding="utf-8") as source:
+        source.write(
+            "SKU-1,tools,2025-06,40,30,1,30,0\n"
+            "SKU-1,tools,2025-07,50,20,1,30,0\n"
+        )
+
+    facts = plan(export)
+    row = facts.recommendations[0]
+    profile = facts.category_profiles[0]
+    assert profile.weights[5:7] == pytest.approx((0.25, 0.75))
+    assert row.annual_demand_qty == pytest.approx(30)
+    assert row.excluded_stockout_months == 10
+    assert row.segment == Segment.PURCHASE
+    assert row.sales_qty_12m == 920
+    assert row.markup_pct_12m == 30
 
 
 def test_category_season_windows_on_pilot_export():

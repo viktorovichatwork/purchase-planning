@@ -32,6 +32,10 @@ class Sale:
     markup_pct: float | None
     partial: bool
 
+    @property
+    def net_quantity(self) -> float:
+        return max(0.0, self.quantity - self.returns)
+
 
 @dataclass(frozen=True)
 class Assortment:

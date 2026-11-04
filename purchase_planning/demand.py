@@ -89,7 +89,8 @@ def estimate_sku_demand(
     sku: str,
     profile: CategoryProfile,
     history_months: tuple[date, ...],
-    sales: dict[tuple[str, date], float],
+    net_sales: dict[tuple[str, date], float],
+    gross_sales: dict[tuple[str, date], float],
     stock: dict[tuple[str, date], float],
     first_sale: date | None,
 ) -> SkuDemand:
@@ -97,9 +98,9 @@ def estimate_sku_demand(
     weights = []
     excluded_months = 0
     for month in history_months:
-        quantity = sales.get((sku, month), 0.0)
-        if not is_stockout_month(stock.get((sku, month), 0.0), quantity):
-            quantities.append(quantity)
+        key = sku, month
+        if not is_stockout_month(stock.get(key, 0.0), gross_sales.get(key, 0.0)):
+            quantities.append(net_sales.get(key, 0.0))
             weights.append(profile.weight_for(month.month))
         elif first_sale is not None and month >= first_sale:
             excluded_months += 1
