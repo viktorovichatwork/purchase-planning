@@ -35,6 +35,7 @@ jobs:
         env:
           EXPLABS_API_KEY: ${{ secrets.EXPLABS_API_KEY }}
           EXPLABS_MODEL: ${{ vars.EXPLABS_MODEL }}
+          LLM_MAX_SKUS: ${{ vars.LLM_MAX_SKUS }}
         run: |
           set -euo pipefail
           PURCHASE_CODE_REVISION="$(git rev-parse HEAD)"

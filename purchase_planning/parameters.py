@@ -1,6 +1,18 @@
+from os import getenv
+
 from purchase_planning import calibration, demand, planner, replenishment, segments, supply
 
 STALE_EXPORT_DAYS = 35
+DEFAULT_LLM_MAX_SKUS = 300
+
+
+def llm_max_skus() -> int:
+    try:
+        limit = int(getenv("LLM_MAX_SKUS", ""))
+    except ValueError:
+        return DEFAULT_LLM_MAX_SKUS
+    return limit if limit >= 0 else DEFAULT_LLM_MAX_SKUS
+
 
 PARAMETER_NUMBER_FORMATS = {
     "Длина сезонного пика, мес.": "0.0",
