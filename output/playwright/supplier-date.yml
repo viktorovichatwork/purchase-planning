@@ -1,0 +1,86 @@
+- main [ref=e2]:
+  - generic [ref=e3]:
+    - generic [ref=e4]:
+      - heading "План закупок" [level=1] [ref=e5]
+      - paragraph [ref=e6]:
+        - text: Остатки и продажи из ERP на
+        - time [ref=e7]: 13.08.2026
+        - text: · пересчитано
+        - time [ref=e8]: 05.11.2026
+    - generic [ref=e9]:
+      - strong [ref=e10]: Устаревшие данные
+      - generic [ref=e11]: "Данным 84 дня: остатки на складе уже другие. Перед заказом загрузите свежую выгрузку."
+      - link "Обновить выгрузку ERP" [ref=e12] [cursor=pointer]:
+        - /url: "#upload"
+    - navigation "Действия с отчётом" [ref=e13]:
+      - link "Скачать XLSX" [ref=e14] [cursor=pointer]:
+        - /url: report.xlsx
+      - link "Как работать с порталом" [ref=e15] [cursor=pointer]:
+        - /url: "#guide"
+  - generic [ref=e16]:
+    - heading "Сводка решения" [level=2] [ref=e17]
+    - generic [ref=e18]:
+      - generic [ref=e19]:
+        - term [ref=e20]: Пора заказывать по данным на 13.08.2026, SKU
+        - definition [ref=e21]:
+          - link "Пора заказывать по данным на 13.08.2026, SKU — 165" [ref=e22] [cursor=pointer]:
+            - /url: "#orders"
+            - text: "165"
+      - generic [ref=e23]:
+        - term [ref=e24]: Решить закупщику, SKU
+        - definition [ref=e25]:
+          - link "Решить закупщику, SKU — 59" [ref=e26] [cursor=pointer]:
+            - /url: "#decide"
+            - text: "59"
+      - generic [ref=e27]:
+        - term [ref=e28]: Не заказывать, SKU
+        - definition [ref=e29]:
+          - link "Не заказывать, SKU — 451" [ref=e30] [cursor=pointer]:
+            - /url: "#skip"
+            - text: "451"
+      - generic [ref=e31]:
+        - term [ref=e32]: Риск дефицита, SKU
+        - definition [ref=e33]:
+          - link "Риск дефицита, SKU — 181" [ref=e34] [cursor=pointer]:
+            - /url: "#risks"
+            - text: "181"
+    - paragraph [ref=e35]: Все показатели — в SKU. Нажмите на число, чтобы открыть вкладку с этими товарами.
+    - paragraph [ref=e36]: Первый запуск, истории для сравнения нет.
+    - group [ref=e37]:
+      - generic "Другие показатели" [ref=e38] [cursor=pointer]
+  - generic [ref=e39]:
+    - navigation "Рабочие разделы" [ref=e40]:
+      - link "Поставщики" [ref=e41] [cursor=pointer]:
+        - /url: "#orders"
+      - link "Решить закупщику" [ref=e42] [cursor=pointer]:
+        - /url: "#decide"
+      - link "Не заказывать" [ref=e43] [cursor=pointer]:
+        - /url: "#skip"
+      - link "Риски дефицита" [ref=e44] [cursor=pointer]:
+        - /url: "#risks"
+      - link "Избыток" [ref=e45] [cursor=pointer]:
+        - /url: "#excess"
+      - link "Сезонные заказы" [ref=e46] [cursor=pointer]:
+        - /url: "#seasons"
+      - link "Аналитика" [ref=e47] [cursor=pointer]:
+        - /url: "#diagnostics"
+      - link "Методика" [ref=e48] [cursor=pointer]:
+        - /url: "#method"
+    - generic [ref=e796]:
+      - heading "Заказ по поставщикам" [level=2] [ref=e797]
+      - paragraph [ref=e798]: "В группе «Заказать» 281 SKU: пора заказывать — 165 SKU (38 813 шт. у 16 поставщиков), в ближайшие 30 дней — 15, позже — 52. Ещё 49 SKU заказывать не нужно: остатка и заказанного хватает, в списке их нет. Товары, по которым нужно решение, стоят у поставщика отдельным блоком «Решить закупщику». Срок заказа «Сейчас» — у 18 поставщиков: у остальных 2 к заказу сейчас только товары «Решить закупщику»."
+      - paragraph [ref=e799]: Раскройте поставщика, чтобы увидеть позиции и сроки.
+      - generic [ref=e800]:
+        - generic [ref=e801]:
+          - text: Поиск по поставщику, SKU, категории или бренду
+          - searchbox "Поиск по поставщику, SKU, категории или бренду" [active] [ref=e802]: SUP-FBCEC0
+        - group [ref=e846]:
+          - generic "SUP-FBCEC0 Когда заказать — 16.09.2026 Сезонная партия — до 16.09.2026 — 800 шт." [ref=e847] [cursor=pointer]:
+            - strong [ref=e848]: SUP-FBCEC0
+            - text: Когда заказать — 16.09.2026
+            - generic [ref=e849]: Сезонная партия — до 16.09.2026 — 800 шт.
+        - generic [ref=e841]:
+          - status [ref=e842]: Показано 1–1 из 1
+          - generic [ref=e843]:
+            - button "Назад" [disabled] [ref=e844]
+            - button "Далее" [disabled] [ref=e845]
