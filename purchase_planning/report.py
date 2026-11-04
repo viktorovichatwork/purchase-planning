@@ -21,9 +21,16 @@ def write_report(
     sheet.append(("Статус", status))
     if facts.cutoff_warning:
         sheet.append(("Предупреждение", facts.cutoff_warning))
-    sheet.append(("Поставщик", "SKU", "К заказу"))
+    sheet.append((
+        "Поставщик", "SKU", "К заказу", "Исключено дефицитных месяцев",
+        *(f"Прогноз {month:%Y-%m}" for month in facts.forecast_months),
+        "Мало данных",
+    ))
     for row in facts.recommendations:
-        sheet.append((row.supplier_id, row.sku_id, row.order_qty))
+        sheet.append((
+            row.supplier_id, row.sku_id, row.order_qty, row.excluded_stockout_months,
+            *row.monthly_forecast, "Да" if row.low_data else None,
+        ))
         for cell in sheet[sheet.max_row][:2]:
             cell.data_type = "s"
 

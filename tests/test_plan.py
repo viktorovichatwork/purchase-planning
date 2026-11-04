@@ -1,5 +1,6 @@
 import csv
 from datetime import date
+from pathlib import Path
 
 import pytest
 from openpyxl import load_workbook
@@ -52,9 +53,12 @@ def test_export_to_order_sheet(export):
     write_report(facts, path, run_date=date(2026, 8, 14))
     workbook = load_workbook(path)
     try:
-        assert list(workbook["Заказ по поставщикам"].values)[-1] == (
-            row.supplier_id, row.sku_id, row.order_qty
+        header, values = list(workbook["Заказ по поставщикам"].values)[-2:]
+        assert header[3:] == (
+            "Исключено дефицитных месяцев", "Прогноз 2026-09", "Прогноз 2026-10",
+            "Прогноз 2026-11", "Прогноз 2026-12", "Прогноз 2027-01", "Прогноз 2027-02", "Мало данных",
         )
+        assert values == (row.supplier_id, row.sku_id, row.order_qty, 29, 20, 20, 20, 20, 20, 20, None)
     finally:
         workbook.close()
 
@@ -96,6 +100,139 @@ def test_explicit_as_of_uses_only_data_available_on_that_date(export):
     assert facts.cutoff == date(2026, 8, 13)
     assert facts.as_of == date(2026, 7, 15)
     assert facts.recommendations[0].order_qty == 45
+
+
+def test_demand_level_uses_complete_months_with_stock_or_sales_from_2024(export):
+    with (export / "sales_monthly.csv").open("a", encoding="utf-8") as source:
+        for month in range(1, 13):
+            source.write(f"SKU-1,tools,2023-{month:02},900,0,1,30,0\n")
+    with (export / "stock_monthly.csv").open("a", encoding="utf-8") as source:
+        source.write("SKU-1,2026-05,15\n")
+
+    row = plan(export).recommendations[0]
+
+    # May had stock and no sales. June had sales and no opening stock.
+    assert row.order_qty == pytest.approx(55)
+    assert row.excluded_stockout_months == 28
+
+
+def test_category_season_windows_on_pilot_export():
+    facts = plan(Path(__file__).resolve().parents[1])
+    profiles = {profile.category: profile for profile in facts.category_profiles}
+
+    assert profiles["space_heaters"].is_seasonal
+    assert profiles["space_heaters"].season_window == (9, 10, 11, 12)
+    assert profiles["string_trimmers"].is_seasonal
+    assert profiles["string_trimmers"].season_window == (3, 4, 5, 6, 7)
+    assert not profiles["sanitary_faucets"].is_seasonal
+    assert profiles["sanitary_faucets"].season_window == ()
+    assert profiles["sanitary_faucets"].weights[0] == pytest.approx(0.105, abs=0.001)
+
+
+def test_category_profile_uses_only_complete_months_available_on_calculation_date(export):
+    (export / "export_meta.json").write_text('{"cutoff_date":"2025-12-13"}', encoding="utf-8")
+    with (export / "sales_monthly.csv").open("a", encoding="utf-8") as source:
+        source.write(
+            "SKU-1,tools,2024-05,10,0,1,30,0\n"
+            "SKU-1,tools,2025-09,30,0,1,30,0\n"
+            "SKU-1,tools,2025-12,1000,0,1,30,1\n"
+        )
+
+    current = plan(export).category_profiles[0]
+    historical = plan(export, as_of=date(2024, 12, 31)).category_profiles[0]
+
+    assert current.weight_for(9) == pytest.approx(0.75)
+    assert current.weight_for(12) == 0
+    assert historical.weight_for(5) == 1
+    assert historical.weight_for(9) == 0
+
+
+@pytest.mark.parametrize(
+    ("sales_months", "window"),
+    [
+        ([1, 2, 5, 11, 12], (11, 12, 1, 2)),
+        ([1, 2, 3, 4, 5], (1, 2, 3, 4)),
+        ([1, 2, 3, 6, 8, 10], (1, 2, 3, 4, 5, 6, 7, 8)),
+    ],
+)
+def test_season_window_wraps_the_year_and_breaks_equal_ties(export, sales_months, window):
+    with (export / "sales_monthly.csv").open("a", encoding="utf-8") as source:
+        for month in sales_months:
+            source.write(f"SKU-1,tools,2023-{month:02},20,0,1,30,0\n")
+
+    assert plan(export).category_profiles[0].season_window == window
+
+
+def test_season_window_includes_exactly_eighty_percent_with_fractional_sales(export):
+    with (export / "sales_monthly.csv").open("a", encoding="utf-8") as source:
+        source.write(
+            "SKU-1,tools,2023-01,0.1,0,1,30,0\n"
+            "SKU-1,tools,2023-02,0.7,0,1,30,0\n"
+            "SKU-1,tools,2023-06,0.2,0,1,30,0\n"
+        )
+
+    assert plan(export).category_profiles[0].season_window == (1, 2)
+
+
+@pytest.mark.parametrize(
+    ("history", "september_forecast", "low_data"),
+    [([(6, 20), (7, 30), (9, 50)], 40, False), ([(9, 100)], 240, True)],
+)
+def test_monthly_forecast_uses_category_weights(export, history, september_forecast, low_data):
+    with (export / "sales_monthly.csv").open("a", encoding="utf-8") as source:
+        for month, quantity in history:
+            source.write(f"SKU-1,tools,2023-{month:02},{quantity},0,1,30,0\n")
+
+    row = plan(export).recommendations[0]
+
+    assert row.monthly_forecast == pytest.approx((september_forecast, 0, 0, 0, 0, 0))
+    assert row.order_qty == pytest.approx(september_forecast - 25)
+    assert row.low_data is low_data
+
+
+@pytest.mark.parametrize(
+    ("months_with_stock", "partial_sale", "monthly_forecast", "low_data"),
+    [
+        (0, False, 60, True), (1, False, 0, True), (2, False, 0, True),
+        (3, False, 0, False), (0, True, 0, False),
+    ],
+)
+def test_analog_forecast_uses_category_and_price_decile_and_respects_own_level(
+    export, months_with_stock, partial_sale, monthly_forecast, low_data
+):
+    sku_dim = export / "sku_dim.csv"
+    with sku_dim.open(encoding="utf-8", newline="") as source:
+        template = next(csv.DictReader(source))
+    with sku_dim.open("a", encoding="utf-8", newline="") as source:
+        writer = csv.DictWriter(source, fieldnames=list(template))
+        for sku, category, decile in (
+            ("SKU-2", "tools", "1.0"),
+            ("SKU-3", "tools", "2"),
+            ("SKU-4", "tools", "1"),
+            ("SKU-5", "other", "1"),
+        ):
+            writer.writerow({
+                **template, "sku_id": sku, "category": category, "price_decile": decile,
+                "first_sale_month": "", "last_sale_month": "", "months_with_sales": "0",
+                "qty_total": "0",
+            })
+    with (export / "sales_monthly.csv").open("a", encoding="utf-8") as source:
+        source.write(
+            "SKU-2,tools,2026-06,100,0,1,30,0\n"
+            "SKU-3,tools,2026-06,500,0,1,30,0\n"
+            "SKU-5,other,2026-06,1000,0,1,30,0\n"
+        )
+        if partial_sale:
+            source.write("SKU-4,tools,2026-08,10,0,1,30,1\n")
+    with (export / "stock_monthly.csv").open("a", encoding="utf-8") as source:
+        for month in range(5, 5 + months_with_stock):
+            source.write(f"SKU-4,2026-{month:02},15\n")
+
+    rows = {row.sku_id: row for row in plan(export).recommendations}
+
+    assert rows["SKU-4"].monthly_forecast == pytest.approx((monthly_forecast,) * 6)
+    assert rows["SKU-4"].low_data is low_data
+    assert not rows["SKU-2"].low_data
 
 
 def test_malformed_metadata_is_rejected(export):
