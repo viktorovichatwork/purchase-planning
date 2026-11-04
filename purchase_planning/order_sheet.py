@@ -1,15 +1,30 @@
+from datetime import date
 from itertools import groupby
 from math import ceil, isclose
 
 from purchase_planning.facts import PlanFacts, Recommendation
 
 
-def displayed_order_qty(row: Recommendation) -> int:
-    packs = row.order_qty / row.order_multiple
+def rounded_quantity(quantity: float, multiple: int) -> int:
+    packs = quantity / multiple
     nearest = round(packs)
     if nearest > 0 and isclose(packs, nearest, rel_tol=1e-12):
-        return nearest * row.order_multiple
-    return ceil(packs) * row.order_multiple
+        return nearest * multiple
+    return ceil(packs) * multiple
+
+
+def displayed_order_qty(row: Recommendation) -> int:
+    if row.seasonal_order and row.seasonal_order.actionable and row.regular_order_qty:
+        return rounded_quantity(row.regular_order_qty, row.order_multiple) + rounded_quantity(
+            row.seasonal_order.order_qty, row.order_multiple,
+        )
+    return rounded_quantity(row.order_qty, row.order_multiple)
+
+
+def order_date_label(day: date, as_of: date, *, date_format: str = "%Y-%m-%d") -> str:
+    if day < as_of:
+        return f"Сейчас (опоздание {(as_of - day).days} дней)"
+    return "Сейчас" if day == as_of else day.strftime(date_format)
 
 
 def supplier_orders(facts: PlanFacts) -> list[tuple[str, list[Recommendation], int]]:

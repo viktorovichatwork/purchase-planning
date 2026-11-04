@@ -7,12 +7,13 @@ from datetime import date, timedelta
 from math import fsum
 from pathlib import Path
 
-from purchase_planning.calibration import read_backtest, stock_multiplier
+from purchase_planning.calibration import read_backtest
 from purchase_planning.demand import apply_analog_levels, category_profiles, estimate_sku_demand
 from purchase_planning.export import ExportValidationError, finite_quantity, read_export
-from purchase_planning.facts import PlanFacts, Recommendation, Segment, SupplierSummary
+from purchase_planning.facts import DemandType, OrderFlag, PlanFacts, Recommendation, Segment, SupplierSummary
 from purchase_planning.inventory import forecast_period, project_stock
 from purchase_planning.order_sheet import displayed_order_qty
+from purchase_planning.replenishment import InventoryPlan, SeasonalBatch, matching_seasonal_batch, plan_inventory
 from purchase_planning.segments import ASSORTMENT_MONTHS, Sale, classify_sku, month_index
 from purchase_planning.supply import PurchaseLine, Receipt, classify_transit, read_supply
 
@@ -180,7 +181,9 @@ def calculate(
     demand_by_sku = apply_analog_levels(sku_rows, own_demand, set(first_sales))
 
     timing, receipts, orders, order_multiples = read_supply(tables, calculation_date, cutoff)
-    transit, order_flags = classify_transit([line for line in orders if line.status == "open"], calculation_date)
+    open_lines = [line for line in orders if line.status == "open"]
+    open_skus = {line.sku for line in open_lines}
+    transit, order_flags = classify_transit(open_lines, calculation_date)
     month_receipts: dict[str, dict[date, float]] = defaultdict(lambda: defaultdict(float))
     current_month = month_index(calculation_date)
     last_complete_month = current_month - (calculation_date < stock_month or stock_month in partial_months)
@@ -195,8 +198,6 @@ def calculate(
             month_receipts[receipt.sku][receipt.received] += receipt.qty
 
     sku_plans: list[tuple[Recommendation, dict[date, float]]] = []
-    quantities_by_supplier: dict[str, list[float]] = defaultdict(list)
-    suppliers_due = set()
     for sku_row in sorted(sku_rows, key=lambda row: (row["supplier_id"], row["sku_id"])):
         sku = sku_row["sku_id"]
         supplier = sku_row["supplier_id"]
@@ -232,62 +233,61 @@ def calculate(
             flags.append("Не определено плечо поставки")
         if cycle is None:
             flags.append("Нет истории для цикла")
-        forecast = {}
-        arrival: date | None = None
-        arrival_stock: float | None = None
-        target_stock: float | None = None
-        safety_stock: float | None = None
-        order_qty = 0.0
-        stockout_risk = False
-        purchase_segment = assortment.segment in {Segment.PURCHASE, Segment.CONDITIONAL}
-        horizon_days = supplier_timing.horizon_days
-        if lead is not None:
-            arrival = calculation_date + timedelta(days=lead)
-            horizon_end = forecast_start + timedelta(days=horizon_days if horizon_days is not None else lead)
-            forecast = dict(forecast_period(profile, annual_level, forecast_start, horizon_end))
-            # Both the cutoff and the expected arrival are measured at the end of the day.
-            cycle_start = arrival + timedelta(days=1)
-            projection = project_stock(
-                current_stock, arrivals, profile, annual_level,
-                start=forecast_start, end=horizon_end, snapshot_at=cycle_start,
-            )
-            arrival_stock = projection.stock_at_snapshot
-            stockout_risk = (
-                purchase_segment
-                and sku in first_sales and assortment.sales_qty_12m > 0
-                and lead > 0 and projection.stockout_by_snapshot
-            )
-            if horizon_days is not None:
-                forecast_total = fsum(forecast.values())
-                multiplier = stock_multiplier(backtest, demand.demand_type, profile.is_seasonal)
-                safety_stock = (multiplier - 1) * forecast_total
-                cycle_forecast = fsum(qty for _, qty in forecast_period(profile, annual_level, cycle_start, horizon_end))
-                target_stock = cycle_forecast + safety_stock
-                if not unknown_supplier and purchase_segment:
-                    order_qty = max(0.0, target_stock - arrival_stock)
-        recommendation = Recommendation(
-            sku_id=sku, supplier_id=supplier, order_qty=order_qty,
-            excluded_stockout_months=demand.excluded_stockout_months, low_data=demand.low_data,
-            stock_at_calculation=current_stock, arrival_date=arrival, stock_at_arrival=arrival_stock,
-            in_transit_by_month=tuple(monthly_transit.items()),
-            order_flags=tuple(sorted(order_flags.get(sku, set()))),
-            segment=assortment.segment, is_new=assortment.is_new,
-            markup_pct_12m=assortment.markup_pct_12m, sales_qty_12m=assortment.sales_qty_12m,
-            sku_flags=tuple(flags), stockout_risk=stockout_risk, annual_demand_qty=annual_level,
-            category=profile.category, demand_type=demand.demand_type, target_stock=target_stock,
-            safety_stock=safety_stock, order_multiple=order_multiples.get(sku, 1),
+        try:
+            decile = float(sku_row["price_decile"])
+            price_decile = int(decile) if decile in range(1, 11) else None
+        except ValueError:
+            price_decile = None
+        inventory = InventoryPlan(calculation_date, current_stock, arrivals, profile, annual_level)
+        forecast_end = forecast_start + timedelta(days=supplier_timing.horizon_days or lead or 0)
+        forecast = dict(forecast_period(profile, annual_level, forecast_start, forecast_end))
+        recommendation = plan_inventory(
+            Recommendation(
+                sku_id=sku, supplier_id=supplier, order_qty=0.0,
+                excluded_stockout_months=demand.excluded_stockout_months, low_data=demand.low_data,
+                stock_at_calculation=current_stock, in_transit_by_month=tuple(monthly_transit.items()),
+                order_flags=tuple(sorted(order_flags.get(sku, ()))), segment=assortment.segment, is_new=assortment.is_new,
+                markup_pct_12m=assortment.markup_pct_12m, sales_qty_12m=assortment.sales_qty_12m,
+                sku_flags=tuple(flags), annual_demand_qty=annual_level, category=profile.category,
+                demand_type=demand.demand_type, order_multiple=order_multiples.get(sku, 1), price_decile=price_decile,
+            ),
+            inventory, supplier_timing, backtest, known_supplier=not unknown_supplier, has_open_orders=sku in open_skus,
         )
         sku_plans.append((recommendation, forecast))
-        if assortment.segment == Segment.PURCHASE:
-            quantities_by_supplier[supplier].append(displayed_order_qty(recommendation))
-            if order_qty > 0 and sku in first_sales:
-                suppliers_due.add(supplier)
+
+    season_batches: dict[str, set[SeasonalBatch]] = defaultdict(set)
+    for row, _ in sku_plans:
+        if row.seasonal_order and row.seasonal_order.actionable:
+            deadline = row.seasonal_order.deadline
+            season_batches[row.supplier_id].add(SeasonalBatch(max(calculation_date, deadline), deadline))
+    quantities_by_supplier: dict[str, list[float]] = defaultdict(list)
+    dates_by_supplier: dict[str, list[date]] = defaultdict(list)
+    for index, (row, forecast) in enumerate(sku_plans):
+        if row.demand_type == DemandType.REGULAR and not profiles[row.category].is_seasonal:
+            batch = matching_seasonal_batch(row, season_batches[row.supplier_id], calculation_date)
+            if batch is not None:
+                # Recompute against the stock on the grouped batch's arrival date.
+                base = replace(row, order_flags=tuple(flag for flag in row.order_flags if flag != OrderFlag.RESCHEDULE))
+                row = plan_inventory(
+                    base, InventoryPlan(calculation_date, row.stock_at_calculation, transit.get(row.sku_id, {}),
+                                        profiles[row.category], row.annual_demand_qty),
+                    timing[row.supplier_id], backtest, known_supplier=True,
+                    has_open_orders=row.sku_id in open_skus, batch=batch,
+                )
+                sku_plans[index] = row, forecast
+        if row.segment == Segment.PURCHASE:
+            quantities_by_supplier[row.supplier_id].append(displayed_order_qty(row))
+        if row.order_qty > 0 and row.order_by is not None:
+            dates_by_supplier[row.supplier_id].append(row.order_by)
 
     forecast_months = tuple(sorted({month for _, forecast in sku_plans for month in forecast}))
-    suppliers = tuple(
-        SupplierSummary(supplier, terms, fsum(quantities_by_supplier[supplier]), supplier in suppliers_due)
-        for supplier, terms in timing.items()
-    )
+    suppliers = []
+    for supplier, terms in timing.items():
+        supplier_deadline = min(dates_by_supplier[supplier], default=None)
+        due = supplier_deadline is not None and (
+            supplier_deadline <= calculation_date + timedelta(days=terms.cycle_days or 0)
+        )
+        suppliers.append(SupplierSummary(supplier, terms, fsum(quantities_by_supplier[supplier]), due, supplier_deadline))
     supply_warning = None
     if calculation_date < cutoff:
         supply_warning = (
@@ -298,6 +298,6 @@ def calculate(
         cutoff, calculation_date, tuple(
             replace(row, monthly_forecast=tuple(forecast.get(month, 0.0) for month in forecast_months))
             for row, forecast in sku_plans
-        ), warning, forecast_months, tuple(profiles.values()), suppliers, supply_warning, backtest, backtest_warning,
+        ), warning, forecast_months, tuple(profiles.values()), tuple(suppliers), supply_warning, backtest, backtest_warning,
     )
     return Calculation(facts, sales_by_sku, receipts, orders)
