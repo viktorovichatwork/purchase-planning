@@ -1,5 +1,5 @@
 import csv
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 
 import pytest
@@ -29,7 +29,10 @@ def export(tmp_path):
             "status,qty_ordered,qty_confirmed,qty_received,qty_pending\n"
             "PO-1,SKU-1,SUP-1,import,2026-01-01,2026-07-01,181,completed,10,10,10,0\n"
         ),
-        "receipts": "sku_id,receipt_date,qty,supplier_id,supply_type\nSKU-1,2026-07-01,10,SUP-1,import\n",
+        "receipts": (
+            "sku_id,receipt_date,qty,supplier_id,supply_type\n"
+            "SKU-1,2026-06-01,10,SUP-1,import\nSKU-1,2026-07-01,10,SUP-1,import\n"
+        ),
         "supplier_dim": (
             "supplier_id,supply_type,receipts_cnt,skus,median_days_between_receipts,"
             "median_planned_lead_days\nSUP-1,import,1,1,,181\n"
@@ -41,24 +44,165 @@ def export(tmp_path):
     return tmp_path
 
 
+def test_forecast_starts_after_cutoff_and_uses_actual_sales_and_receipts_through_cutoff(export):
+    sales = export / "sales_monthly.csv"
+    sales.write_text(
+        sales.read_text(encoding="utf-8").replace(",880,", ",20,"),
+        encoding="utf-8",
+    )
+    with (export / "receipts.csv").open("a", encoding="utf-8") as source:
+        source.write("SKU-1,2026-08-10,10,SUP-1,import\n")
+
+    facts = plan(export)
+    supplier = facts.suppliers[0]
+    row = facts.recommendations[0]
+    assert supplier.timing.lead_days == 201
+    assert supplier.timing.cycle_days == 35
+    assert row.arrival_date == date(2027, 3, 2)
+    assert facts.forecast_months[0] == date(2026, 8, 1)
+    assert facts.forecast_months[-1] == date(2027, 4, 1)
+    assert row.monthly_forecast[0] == pytest.approx(20 * 18 / 31)
+    assert row.monthly_forecast[-1] == pytest.approx(20 * 6 / 30)
+    assert row.stock_at_calculation == 15
+    assert row.stock_at_arrival == 0
+
+
+@pytest.mark.parametrize(
+    ("count", "lead", "source"),
+    [(4, 200, "Вся история заказов + 20 дней"), (5, 210, "История заказов + p75")],
+)
+def test_supplier_timing_counts_batches_and_does_not_cap_lead(export, count, lead, source):
+    orders = export / "purchase_orders.csv"
+    header = orders.read_text(encoding="utf-8").splitlines()[0]
+    starts = [date(2025, month, 1) for month in (1, 2, 3, 4, 6)]
+    with orders.open("w", encoding="utf-8") as po, (export / "receipts.csv").open("a", encoding="utf-8") as receipts:
+        po.write(header + "\n")
+        for i, (start, promise, delay) in enumerate(
+            zip(starts, [170, 180, 190, 195, 200], [0, 5, 10, 20, 40], strict=True)
+        ):
+            if i == count:
+                break
+            promised = start + timedelta(days=promise)
+            received = promised + timedelta(days=delay)
+            qty = 101 + i
+            po.write(f"PO-{i},SKU-1,SUP-1,import,{start},{promised},{promise},completed,{qty},{qty},{qty},0\n")
+            receipts.write(f"SKU-1,{received},{qty},SUP-1,import\n")
+        po.write("PO-0,SKU-1,SUP-1,import,2025-01-01,2025-06-20,170,closed,100,0,0,100\n")
+        receipts.write("SKU-1,2025-10-01,100,SUP-1,import\n")
+
+    timing = plan(export).suppliers[0].timing
+    assert (timing.lead_days, timing.lead_source, timing.cycle_days) == (lead, source, 31)
+
+
+def test_sparse_recent_history_uses_all_planned_lead_days(export):
+    orders = export / "purchase_orders.csv"
+    header = orders.read_text(encoding="utf-8").splitlines()[0]
+    orders.write_text(
+        header + "\n"
+        "PO-1,SKU-1,SUP-1,import,2024-01-01,2024-02-01,120,closed,10,0,0,10\n"
+        "PO-2,SKU-1,SUP-1,import,2024-06-01,2024-07-01,150,closed,10,0,0,10\n"
+        "PO-3,SKU-1,SUP-1,import,2025-01-01,2025-01-07,6,closed,10,0,0,10\n",
+        encoding="utf-8",
+    )
+
+    timing = plan(export).suppliers[0].timing
+    assert (timing.lead_days, timing.lead_source) == (140, "Вся история заказов + 20 дней")
+
+
+@pytest.mark.parametrize(
+    ("supply_type", "planned_days", "lead", "source"),
+    [
+        ("import", "0", 20, "Вся история заказов + 20 дней · проверить плечо"),
+        ("import", "10", 30, "Вся история заказов + 20 дней"),
+        ("local", "0", 20, "Вся история заказов + 20 дней"),
+        ("import", "", 20, "Справочник + 20 дней · проверить плечо"),
+    ],
+)
+def test_short_import_lead_is_flagged_in_source_column(export, supply_type, planned_days, lead, source):
+    orders = export / "purchase_orders.csv"
+    orders.write_text(
+        orders.read_text(encoding="utf-8").replace(",181,completed", f",{planned_days},completed"),
+        encoding="utf-8",
+    )
+    suppliers = export / "supplier_dim.csv"
+    suppliers.write_text(
+        suppliers.read_text(encoding="utf-8").replace(",import,1,1,,181", f",{supply_type},1,1,,0"),
+        encoding="utf-8",
+    )
+
+    path = export / "order.xlsx"
+    write_report(plan(export), path)
+    workbook = load_workbook(path)
+    try:
+        header, row, _ = list(workbook["Заказ по поставщикам"].values)[-3:]
+        assert row[header.index("Плечо, дней")] == lead
+        assert row[header.index("Источник плеча")] == source
+    finally:
+        workbook.close()
+
+
+def test_open_orders_respect_arrival_and_overdue_boundaries(export):
+    with (export / "purchase_orders.csv").open("a", encoding="utf-8") as source:
+        source.write(
+            "PO-2,SKU-1,SUP-1,import,2026-01-01,2026-07-14,194,open,20,20,15,5\n"
+            "PO-3,SKU-1,SUP-1,import,2026-01-01,2026-07-13,193,open,100,100,90,10\n"
+            "PO-4,SKU-1,SUP-1,import,2026-01-01,2026-07-13,193,open,100,100,89,11\n"
+            "PO-5,SKU-1,SUP-1,import,2026-01-01,2026-10-01,273,open,1000,1000,0,1000\n"
+            "PO-6,SKU-1,SUP-1,import,2026-01-01,2026-08-14,225,closed,1000,0,0,1000\n"
+        )
+
+    facts = plan(export)
+    row = facts.recommendations[0]
+    assert row.in_transit_by_month == ((date(2026, 8, 1), 5), (date(2026, 10, 1), 1000))
+    assert set(row.order_flags) == {
+        "Хвост заказа", "Зависший заказ", "Дата прихода просроченного заказа оценена",
+    }
+    assert row.order_qty == pytest.approx(20 * 18 / 31 - 5 + 20)
+    assert row.arrival_date == date(2027, 3, 15)
+    assert row.stock_at_arrival == pytest.approx(1000 - 20 * (5 + 15 / 31))
+    assert facts.suppliers[0].time_to_order
+
+
+def test_missing_cycle_flags_supplier_and_suppresses_order(export):
+    (export / "receipts.csv").write_text(
+        "sku_id,receipt_date,qty,supplier_id,supply_type\nSKU-1,2026-07-01,10,SUP-1,import\n",
+        encoding="utf-8",
+    )
+
+    facts = plan(export)
+    supplier = facts.suppliers[0]
+    assert supplier.timing.cycle_days is None
+    assert "Нет истории для цикла" in supplier.timing.flags
+    assert facts.recommendations[0].stock_at_arrival == 0
+    assert supplier.order_qty == facts.recommendations[0].order_qty == 0
+    assert not supplier.time_to_order
+
+
 def test_export_to_order_sheet(export):
     facts = plan(export)
     assert facts == plan(export)
     assert facts.as_of == facts.cutoff == date(2026, 8, 13)
     assert len(facts.recommendations) == 1
     row = facts.recommendations[0]
-    assert (row.supplier_id, row.sku_id, row.order_qty) == ("SUP-1", "SKU-1", 95)
+    assert (row.supplier_id, row.sku_id) == ("SUP-1", "SKU-1")
+    assert row.order_qty == pytest.approx(20 * (18 / 31 + 7 + 1 / 30))
 
     path = export / "order.xlsx"
     write_report(facts, path, run_date=date(2026, 8, 14))
     workbook = load_workbook(path)
     try:
-        header, values = list(workbook["Заказ по поставщикам"].values)[-2:]
-        assert header[3:] == (
-            "Исключено дефицитных месяцев", "Прогноз 2026-09", "Прогноз 2026-10",
-            "Прогноз 2026-11", "Прогноз 2026-12", "Прогноз 2027-01", "Прогноз 2027-02", "Мало данных",
+        header, values, total = list(workbook["Заказ по поставщикам"].values)[-3:]
+        assert header[3:14] == (
+            "Исключено дефицитных месяцев", "Прогноз 2026-08", "Прогноз 2026-09",
+            "Прогноз 2026-10", "Прогноз 2026-11", "Прогноз 2026-12", "Прогноз 2027-01",
+            "Прогноз 2027-02", "Прогноз 2027-03", "Прогноз 2027-04", "Мало данных",
         )
-        assert values == (row.supplier_id, row.sku_id, row.order_qty, 29, 20, 20, 20, 20, 20, 20, None)
+        assert values[:2] == (row.supplier_id, row.sku_id)
+        assert values[2:13] == pytest.approx((row.order_qty, 29, *row.monthly_forecast))
+        assert values[14:17] == (201, "Вся история заказов + 20 дней", 30)
+        assert total[:2] == ("SUP-1", "Итого")
+        assert total[2] == pytest.approx(row.order_qty)
+        assert total[header.index("Пора заказывать у поставщика")] == "Да"
     finally:
         workbook.close()
 
@@ -67,7 +211,7 @@ def test_missing_metadata_uses_last_complete_month_and_warns_in_report(export):
     (export / "export_meta.json").unlink()
     facts = plan(export)
     assert facts.as_of == facts.cutoff == date(2026, 7, 31)
-    assert facts.recommendations[0].order_qty == 105
+    assert facts.recommendations[0].order_qty == pytest.approx(20 * (7 + 19 / 31))
 
     path = export / "order.xlsx"
     write_report(facts, path)
@@ -99,7 +243,10 @@ def test_explicit_as_of_uses_only_data_available_on_that_date(export):
     facts = plan(export, as_of=date(2026, 7, 15))
     assert facts.cutoff == date(2026, 8, 13)
     assert facts.as_of == date(2026, 7, 15)
-    assert facts.recommendations[0].order_qty == 45
+    row = facts.recommendations[0]
+    assert row.stock_at_calculation == pytest.approx(25 - 10 * 15 / 31)
+    assert row.monthly_forecast[0] == pytest.approx(10 * 16 / 31)
+    assert facts.supply_warning
 
 
 def test_demand_level_uses_complete_months_with_stock_or_sales_from_2024(export):
@@ -112,7 +259,7 @@ def test_demand_level_uses_complete_months_with_stock_or_sales_from_2024(export)
     row = plan(export).recommendations[0]
 
     # May had stock and no sales. June had sales and no opening stock.
-    assert row.order_qty == pytest.approx(55)
+    assert row.monthly_forecast[1] == pytest.approx(40 / 3)
     assert row.excluded_stockout_months == 28
 
 
@@ -183,10 +330,13 @@ def test_monthly_forecast_uses_category_weights(export, history, september_forec
         for month, quantity in history:
             source.write(f"SKU-1,tools,2023-{month:02},{quantity},0,1,30,0\n")
 
-    row = plan(export).recommendations[0]
+    facts = plan(export)
+    row = facts.recommendations[0]
 
-    assert row.monthly_forecast == pytest.approx((september_forecast, 0, 0, 0, 0, 0))
-    assert row.order_qty == pytest.approx(september_forecast - 25)
+    september = facts.forecast_months.index(date(2026, 9, 1))
+    assert row.monthly_forecast[september] == pytest.approx(september_forecast)
+    assert sum(row.monthly_forecast) == pytest.approx(september_forecast)
+    assert row.order_qty == pytest.approx(september_forecast)
     assert row.low_data is low_data
 
 
@@ -230,7 +380,9 @@ def test_analog_forecast_uses_category_and_price_decile_and_respects_own_level(
 
     rows = {row.sku_id: row for row in plan(export).recommendations}
 
-    assert rows["SKU-4"].monthly_forecast == pytest.approx((monthly_forecast,) * 6)
+    assert rows["SKU-4"].monthly_forecast == pytest.approx(
+        (monthly_forecast * 18 / 31, *((monthly_forecast,) * 7), monthly_forecast / 30)
+    )
     assert rows["SKU-4"].low_data is low_data
     assert not rows["SKU-2"].low_data
 

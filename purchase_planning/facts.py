@@ -24,6 +24,27 @@ class Recommendation:
     excluded_stockout_months: int = 0
     monthly_forecast: tuple[float, ...] = ()
     low_data: bool = False
+    stock_at_calculation: float = 0.0
+    arrival_date: date | None = None
+    stock_at_arrival: float | None = None
+    in_transit_by_month: tuple[tuple[date, float], ...] = ()
+    order_flags: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class SupplierTiming:
+    lead_days: int | None
+    lead_source: str
+    cycle_days: int | None
+    flags: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class SupplierSummary:
+    supplier_id: str
+    timing: SupplierTiming
+    order_qty: float
+    time_to_order: bool
 
 
 @dataclass(frozen=True)
@@ -34,6 +55,8 @@ class PlanFacts:
     cutoff_warning: str | None = None
     forecast_months: tuple[date, ...] = ()
     category_profiles: tuple[CategoryProfile, ...] = ()
+    suppliers: tuple[SupplierSummary, ...] = ()
+    supply_warning: str | None = None
 
     def __post_init__(self) -> None:
         if any(len(row.monthly_forecast) != len(self.forecast_months) for row in self.recommendations):
