@@ -177,20 +177,26 @@ def _supplier_timing(
     return SupplierTiming(lead_days, source, ceil(cycle) if cycle is not None else None, tuple(flags))
 
 
+def read_supply_history(tables: dict[str, list[dict[str, str]]]) -> tuple[list[PurchaseLine], list[Receipt]]:
+    return (
+        [_purchase_line(row) for row in tables["purchase_orders"]],
+        [_receipt(row) for row in tables["receipts"]],
+    )
+
+
 def read_supply(
     tables: dict[str, list[dict[str, str]]], as_of: date, cutoff: date,
+    order_history: list[PurchaseLine], receipt_history: list[Receipt],
 ) -> tuple[dict[str, SupplierTiming], list[Receipt], list[PurchaseLine], dict[str, int]]:
     orders_by_supplier: dict[str, list[PurchaseLine]] = defaultdict(list)
     quantities_by_sku: dict[str, list[float]] = defaultdict(list)
-    for row in tables["purchase_orders"]:
-        line = _purchase_line(row)
+    for line in order_history:
         if line.placed <= as_of:
             orders_by_supplier[line.supplier].append(line)
             if line.ordered > 0:
                 quantities_by_sku[line.sku].append(line.ordered)
     receipts_by_supplier: dict[str, list[Receipt]] = defaultdict(list)
-    for row in tables["receipts"]:
-        receipt = _receipt(row)
+    for receipt in receipt_history:
         if receipt.received <= as_of and receipt.qty > 0:
             receipts_by_supplier[receipt.supplier].append(receipt)
 

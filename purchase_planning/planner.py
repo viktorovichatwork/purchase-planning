@@ -15,7 +15,7 @@ from purchase_planning.inventory import forecast_period, project_stock
 from purchase_planning.order_sheet import displayed_order_qty
 from purchase_planning.replenishment import InventoryPlan, SeasonalBatch, matching_seasonal_batch, plan_inventory
 from purchase_planning.segments import ASSORTMENT_MONTHS, Sale, classify_sku, month_index
-from purchase_planning.supply import PurchaseLine, Receipt, classify_transit, read_supply
+from purchase_planning.supply import PurchaseLine, Receipt, classify_transit, read_supply, read_supply_history
 
 STOCK_HISTORY_START = date(2024, 1, 1)
 
@@ -43,17 +43,22 @@ def _complete_stock_months(as_of: date, partial_months: set[date]) -> tuple[date
     return tuple(months)
 
 
-def _read_cutoff(path: Path, complete_months: list[date]) -> tuple[date, str | None]:
+def _read_cutoff(
+    path: Path, complete_months: list[date], orders: list[PurchaseLine], receipts: list[Receipt],
+) -> tuple[date, str]:
     try:
         contents = path.read_text(encoding="utf-8-sig")
     except FileNotFoundError:
-        if not complete_months:
-            raise ExportValidationError(
-                ["Нет export_meta.json и в продажах нет полного месяца для определения даты среза."]
-            ) from None
-        return max(complete_months), (
-            "Нет export_meta.json. Дата среза принята равной последнему дню последнего полного месяца."
+        candidates = (
+            (max(complete_months, default=None), "по последнему полному месяцу продаж"),
+            (max((receipt.received for receipt in receipts), default=None), "по последнему приходу"),
+            (max((line.placed for line in orders), default=None), "по последнему заказу"),
         )
+        latest = max(((day, source) for day, source in candidates if day is not None), key=lambda item: item[0], default=None)
+        if latest is None:
+            raise ExportValidationError(["В выгрузке нет дат для определения даты среза."]) from None
+        day, source = latest
+        return day, f"{source} {day:%d.%m.%Y}"
     except (OSError, UnicodeError):
         raise ExportValidationError(["Не удалось прочитать export_meta.json в UTF-8."]) from None
 
@@ -66,7 +71,7 @@ def _read_cutoff(path: Path, complete_months: list[date]) -> tuple[date, str | N
         raise ExportValidationError(
             ["export_meta.json: укажите cutoff_date в формате YYYY-MM-DD."]
         ) from None
-    return cutoff, None
+    return cutoff, "по явно заданной дате выгрузки"
 
 
 def _sku_known_at(row: dict[str, str], as_of: date) -> bool:
@@ -134,10 +139,12 @@ def calculate(
     directory = Path(data_dir)
     tables = read_export(directory)
     sales_rows, stock, partial_months = read_monthly_history(tables)
+    order_history, receipt_history = read_supply_history(tables)
 
-    cutoff, warning = _read_cutoff(
+    cutoff, cutoff_source = _read_cutoff(
         directory / "export_meta.json",
         [sale.month for _, sale in sales_rows if sale.month not in partial_months],
+        order_history, receipt_history,
     )
     calculation_date = cutoff if as_of is None else as_of
     if calculation_date > cutoff:
@@ -181,7 +188,7 @@ def calculate(
     }
     demand_by_sku = apply_analog_levels(sku_rows, own_demand, set(first_sales))
 
-    timing, receipts, orders, order_multiples = read_supply(tables, calculation_date, cutoff)
+    timing, receipts, orders, order_multiples = read_supply(tables, calculation_date, cutoff, order_history, receipt_history)
     open_lines = [line for line in orders if line.status == "open"]
     open_skus = {line.sku for line in open_lines}
     transit, order_flags = classify_transit(open_lines, calculation_date)
@@ -299,6 +306,6 @@ def calculate(
         cutoff, calculation_date, tuple(
             replace(row, monthly_forecast=tuple(forecast.get(month, 0.0) for month in forecast_months))
             for row, forecast in sku_plans
-        ), warning, forecast_months, tuple(profiles.values()), tuple(suppliers), supply_warning, backtest, backtest_warning,
+        ), cutoff_source, forecast_months, tuple(profiles.values()), tuple(suppliers), supply_warning, backtest, backtest_warning,
     )
     return Calculation(facts, sales_by_sku, receipts, orders)

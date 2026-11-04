@@ -21,6 +21,7 @@ from purchase_planning.order_sheet import displayed_order_qty
 from purchase_planning.parameters import llm_max_skus, run_parameters
 from purchase_planning.planner import calculate
 from purchase_planning.report import write_report
+from purchase_planning.sku_labels import load_sku_labels
 
 
 def _read_json(path: Path):
@@ -122,6 +123,7 @@ def run_plan(
         calculation = calculate(directory, previous_segments=previous_segments, backtest_dir=backtest_dir)
     facts = calculation.facts
     _validate_plan(facts)
+    sku_labels = load_sku_labels(directory)
     if facts.backtest is not None:
         for group in facts.backtest.quantiles:
             parameters[f"Множитель, {group.lower()} спрос"] = stock_multiplier(facts.backtest, group, False)
@@ -150,7 +152,7 @@ def run_plan(
         _write_json(staging / "parameters.json", parameters)
         _write_json(staging / "evidence.json", evidence)
         _write_json(staging / "diff.json", {"previous_run": previous.name if previous else None, "changes": changes})
-        write_report(facts, staging / "report.xlsx", run_date=run_date, parameters=parameters)
+        write_report(facts, staging / "report.xlsx", run_date=run_date, parameters=parameters, sku_labels=sku_labels)
         explanations, llm_stats = explain(facts, changes, gateway(stub=stub_llm), max_skus=max_skus)
         _write_json(staging / "run.json", {
             "started_at": started_at.isoformat(), "run_date": run_date.isoformat(),
@@ -160,6 +162,7 @@ def run_plan(
         write_dashboard(
             facts, staging / "index.html", run_date=run_date,
             previous_run=previous.name if previous else None, changes=changes, explanations=explanations,
+            sku_labels=sku_labels,
         )
         if previous and old_facts:
             _history_page(

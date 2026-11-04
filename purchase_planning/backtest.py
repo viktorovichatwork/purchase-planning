@@ -17,6 +17,7 @@ from purchase_planning.export import ExportValidationError, read_export
 from purchase_planning.facts import BacktestMetric, BacktestQuantiles, BacktestResult, DemandType
 from purchase_planning.inventory import month_shares
 from purchase_planning.planner import _read_cutoff, plan, read_monthly_history
+from purchase_planning.supply import read_supply_history
 
 FIRST_ORIGIN = date(2024, 6, 30)
 BASELINE_MONTHS = 12
@@ -43,9 +44,12 @@ def _metrics(breakdown: str, group: str, windows: list[tuple[float, float, float
 
 def run_backtest(data_dir: str | Path) -> BacktestResult:
     directory = Path(data_dir)
-    sales_rows, stock, partial_months = read_monthly_history(read_export(directory))
+    tables = read_export(directory)
+    sales_rows, stock, partial_months = read_monthly_history(tables)
+    orders, receipts = read_supply_history(tables)
     cutoff, _ = _read_cutoff(
         directory / "export_meta.json", [sale.month for _, sale in sales_rows if sale.month not in partial_months],
+        orders, receipts,
     )
     sales: dict[tuple[str, date], float] = defaultdict(float)
     for sku, sale in sales_rows:

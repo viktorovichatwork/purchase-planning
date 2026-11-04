@@ -235,24 +235,26 @@ def test_export_to_order_sheet(export):
     workbook = load_workbook(path)
     try:
         header, values, total = list(workbook["Заказ по поставщикам"].values)[-3:]
-        assert header[3:6] == ("Исключено дефицитных месяцев", "Прогноз на горизонт, шт.", "Мало данных")
+        assert header[2:7] == (
+            "Товар", "К заказу", "Исключено дефицитных месяцев", "Прогноз на горизонт, шт.", "Мало данных",
+        )
         assert values[:2] == (row.supplier_id, row.sku_id)
-        assert values[2:5] == (20, 0, round(sum(row.monthly_forecast)))
+        assert values[3:6] == (20, 0, round(sum(row.monthly_forecast)))
         assert values[header.index("Целевой запас")] == pytest.approx(19.3763441)
         assert values[header.index("Страховой запас")] == 0
         assert values[header.index("Тип спроса")] == "Регулярный"
-        assert values[6:9] == (201, "Вся история заказов + 20 дней", 30)
+        assert values[7:10] == (201, "Вся история заказов + 20 дней", 30)
         sales_column = header.index("Продажи за 12 мес, шт.")
         assert header[sales_column + 1] == "Оценка спроса в год, шт."
         assert values[sales_column:sales_column + 2] == (920, 240)
         forecast_header, forecast_row = list(workbook["Прогноз"].values)
-        assert forecast_header[2:2 + len(facts.forecast_months)] == tuple(
+        assert forecast_header[3:3 + len(facts.forecast_months)] == tuple(
             f"Прогноз {month:%Y-%m}" for month in facts.forecast_months
         )
-        assert forecast_row[2:2 + len(facts.forecast_months)] == tuple(round(qty) for qty in row.monthly_forecast)
+        assert forecast_row[3:3 + len(facts.forecast_months)] == tuple(round(qty) for qty in row.monthly_forecast)
         assert forecast_row[forecast_header.index("Покрытие, мес")] == 0
         assert total[:2] == ("SUP-1", "Итого")
-        assert total[2] == 20
+        assert total[header.index("К заказу")] == 20
         assert total[header.index("Пора заказывать у поставщика")] == "Да"
     finally:
         workbook.close()
@@ -331,13 +333,13 @@ def test_saved_backtest_excludes_stockouts_and_calibrates_the_order(export):
         assert row[headers.index("Страховой запас")] == pytest.approx(25.8064516)
         assert row[headers.index("Кратность")] == 50
         assert row[headers.index("К заказу до округления, шт.")] == pytest.approx(51.6129032)
-        assert row[2] == total[2] == 100
+        assert row[headers.index("К заказу")] == total[headers.index("К заказу")] == 100
     finally:
         workbook.close()
     assert "57,1%" in (run / "index.html").read_text(encoding="utf-8")
 
 
-def test_missing_metadata_uses_last_complete_month_and_warns_in_report(export):
+def test_missing_metadata_uses_last_complete_month_and_reports_source(export):
     (export / "export_meta.json").unlink()
     facts = plan(export)
     assert facts.as_of == facts.cutoff == date(2026, 7, 31)
@@ -347,7 +349,8 @@ def test_missing_metadata_uses_last_complete_month_and_warns_in_report(export):
     write_report(facts, path)
     workbook = load_workbook(path)
     try:
-        assert "Нет export_meta.json" in workbook["Заказ по поставщикам"]["B3"].value
+        parameters = dict(workbook["Параметры"].values)
+        assert parameters["Как определена дата среза"] == "по последнему полному месяцу продаж 31.07.2026"
     finally:
         workbook.close()
 
@@ -358,6 +361,34 @@ def test_partially_marked_month_is_excluded_from_fallback(export):
         source.write("SKU-1,tools,2026-08,20,0,1,30,0\n")
 
     assert plan(export).cutoff == date(2026, 7, 31)
+
+
+@pytest.mark.parametrize(("order_date", "metadata_date", "expected", "source", "stock"), [
+    ("2026-07-01", None, date(2026, 8, 1), "по последнему приходу 01.08.2026", 70),
+    ("2026-08-02", None, date(2026, 8, 2), "по последнему заказу 02.08.2026", 70),
+    ("2026-07-01", "2026-07-31", date(2026, 7, 31), "по явно заданной дате выгрузки", 0),
+])
+def test_cutoff_uses_latest_observed_activity_unless_explicit(export, order_date, metadata_date, expected, source, stock):
+    metadata = export / "export_meta.json"
+    if metadata_date is None:
+        metadata.unlink()
+    else:
+        metadata.write_text(json.dumps({"cutoff_date": metadata_date}), encoding="utf-8")
+    sales = export / "sales_monthly.csv"
+    sales.write_text(sales.read_text(encoding="utf-8").replace("2026-08,880,", "2026-08,0,"), encoding="utf-8")
+    with (export / "receipts.csv").open("a", encoding="utf-8") as receipts:
+        receipts.write("SKU-1,2026-08-01,45,SUP-1,import\n")
+    with (export / "purchase_orders.csv").open("a", encoding="utf-8") as orders:
+        orders.write("PO-2,SKU-1,SUP-1,import,2026-07-01,2026-08-01,31,completed,45,45,45,0\n")
+        if order_date == "2026-08-02":
+            orders.write("PO-3,SKU-1,SUP-1,import,2026-08-02,,31,closed,45,0,0,45\n")
+
+    facts = plan(export)
+    assert facts.cutoff == facts.as_of == expected
+    assert facts.cutoff_source == source
+    row = facts.recommendations[0]
+    assert row.stock_at_calculation == stock
+    assert row.in_transit == 0
 
 
 def test_csv_with_only_blank_fields_is_rejected(export):
@@ -577,7 +608,9 @@ def test_sleeping_sku_is_reported_without_an_order(export):
     write_report(facts, path)
     with path.open("rb") as report:
         workbook = load_workbook(report)
-        assert list(workbook["Спящие"].values)[1][:3] == ("SUP-1", "SKU-1", 0)
+        header, sleeping = workbook["Спящие"].values
+        assert sleeping[:2] == ("SUP-1", "SKU-1")
+        assert sleeping[header.index("К заказу")] == 0
         assert all("SKU-1" not in values for values in workbook["Заказ по поставщикам"].values)
         workbook.close()
 
@@ -666,17 +699,17 @@ def test_pilot_export_lists_orders_and_flags_missing_supplier_timing(tmp_path):
     try:
         for segment in Segment:
             name = "Заказ по поставщикам" if segment == Segment.PURCHASE else segment
+            header = next(row for row in workbook[name].values if row[1] == "SKU")
             data = [row for row in workbook[name].values if row[1] in catalog]
             assert sorted(row[1] for row in data) == sorted(
                 row.sku_id for row in rows.values()
                 if (row.order_qty > 0 if segment == Segment.PURCHASE else row.segment == segment)
             )
             if segment == Segment.REVIEW:
-                header = next(workbook[name].values)
                 sales = [row[header.index("Продажи за 12 мес, шт.")] for row in data]
                 assert sales == sorted(sales, reverse=True)
             if segment in {Segment.DEAD, Segment.SLEEPING, Segment.REVIEW}:
-                assert all(row[2] == 0 for row in data)
+                assert all(row[header.index("К заказу")] == 0 for row in data)
     finally:
         workbook.close()
 
@@ -716,7 +749,7 @@ def test_first_stockout_before_in_transit_receipt(export):
     with_workbook = load_workbook(path, read_only=True)
     try:
         _, risk = list(with_workbook["Риски дефицита"].values)
-        assert risk[:5] == ("SKU-1", "SUP-1", 60, 100, "2026-03-31")
+        assert risk[:6] == ("SKU-1", None, "SUP-1", 60, 100, "2026-03-31")
         headers, forecast = list(with_workbook["Прогноз"].values)
         assert forecast[headers.index("Покрытие, мес")] == 2
     finally:
