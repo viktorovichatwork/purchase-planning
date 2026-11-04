@@ -2,9 +2,9 @@ from collections import defaultdict
 from dataclasses import dataclass, replace
 from datetime import date
 from math import isclose
-from statistics import mean, median
+from statistics import mean, median, pvariance
 
-from purchase_planning.facts import CategoryProfile
+from purchase_planning.facts import CategoryProfile, DemandType
 
 MONTHS_PER_YEAR = 12
 PROFILE_START_YEAR = 2020
@@ -14,6 +14,8 @@ SEASON_PEAK_MONTHS = 3
 SEASON_PEAK_SHARE = 0.5
 SEASON_WINDOW_SHARE = 0.8
 MIN_OWN_DEMAND_MONTHS = 3
+SBC_ADI_THRESHOLD = 1.32
+SBC_CV2_THRESHOLD = 0.49
 
 
 @dataclass(frozen=True)
@@ -22,6 +24,18 @@ class SkuDemand:
     excluded_stockout_months: int
     low_data: bool
     eligible_months: int
+    demand_type: DemandType
+
+
+def _demand_type(quantities: list[float]) -> DemandType:
+    positive = [quantity for quantity in quantities if quantity > 0]
+    if len(positive) < 2:
+        return DemandType.INTERMITTENT
+    adi = len(quantities) / len(positive)
+    cv2 = pvariance(positive) / mean(positive) ** 2
+    if adi < SBC_ADI_THRESHOLD and cv2 < SBC_CV2_THRESHOLD:
+        return DemandType.REGULAR
+    return DemandType.INTERMITTENT
 
 
 def _season_window(monthly_totals: list[float], annual_total: float) -> tuple[int, ...]:
@@ -67,6 +81,10 @@ def category_profiles(
     return profiles
 
 
+def is_stockout_month(opening_stock: float, sales_qty: float) -> bool:
+    return opening_stock == 0 and sales_qty == 0
+
+
 def estimate_sku_demand(
     sku: str,
     profile: CategoryProfile,
@@ -80,18 +98,19 @@ def estimate_sku_demand(
     excluded_months = 0
     for month in history_months:
         quantity = sales.get((sku, month), 0.0)
-        if stock.get((sku, month), 0.0) != 0 or quantity != 0:
+        if not is_stockout_month(stock.get((sku, month), 0.0), quantity):
             quantities.append(quantity)
             weights.append(profile.weight_for(month.month))
         elif first_sale is not None and month >= first_sale:
             excluded_months += 1
 
+    demand_type = _demand_type(quantities)
     if not quantities:
-        return SkuDemand(None, excluded_months, False, 0)
+        return SkuDemand(None, excluded_months, False, 0, demand_type)
     exposure = sum(weights)
     if exposure == 0:
-        return SkuDemand(mean(quantities) * MONTHS_PER_YEAR, excluded_months, True, len(quantities))
-    return SkuDemand(sum(quantities) / exposure, excluded_months, False, len(quantities))
+        return SkuDemand(mean(quantities) * MONTHS_PER_YEAR, excluded_months, True, len(quantities), demand_type)
+    return SkuDemand(sum(quantities) / exposure, excluded_months, False, len(quantities), demand_type)
 
 
 def apply_analog_levels(

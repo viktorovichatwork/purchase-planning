@@ -15,6 +15,7 @@ MIN_CYCLE_DAYS = 30
 MAX_CYCLE_DAYS = 120
 MAX_TRANSIT_OVERDUE_DAYS = 30
 ORDER_TAIL_SHARE = 0.10
+ORDER_MULTIPLES = (100, 50, 10)
 
 
 @dataclass(frozen=True)
@@ -75,12 +76,12 @@ def _receipt(row: dict[str, str]) -> Receipt:
 
 
 def _matched_receipt_dates(
-    orders: list[PurchaseLine], receipts: list[Receipt],
+    orders: list[PurchaseLine], receipts: list[Receipt], *, use_snapshot: bool,
 ) -> dict[PurchaseLine, date]:
     # ERP omits po_id from receipts. Use a full-quantity match only when unique in both directions.
     orders_by_item: dict[tuple[str, float], list[PurchaseLine]] = defaultdict(list)
     for line in orders:
-        if line.ordered > 0 and line.received >= line.ordered:
+        if line.ordered > 0 and (not use_snapshot or line.received >= line.ordered):
             orders_by_item[line.sku, line.ordered].append(line)
     dates: dict[PurchaseLine, list[date]] = defaultdict(list)
     ambiguous: set[PurchaseLine] = set()
@@ -110,7 +111,7 @@ def _supplier_timing(
     delays: dict[str | tuple[date, date | None], int] = {}
     recent = [line for line in orders if line.placed >= LEAD_HISTORY_START]
     enough_recent_batches = len({line.batch for line in recent}) >= MIN_ORDERS
-    matched = _matched_receipt_dates(orders, receipts) if enough_recent_batches else {}
+    matched = _matched_receipt_dates(orders, receipts, use_snapshot=use_summary) if enough_recent_batches else {}
     for line in recent:
         if line.promised is None or line.promised < line.placed:
             continue
@@ -177,12 +178,15 @@ def _supplier_timing(
 
 def read_supply(
     tables: dict[str, list[dict[str, str]]], as_of: date, cutoff: date,
-) -> tuple[dict[str, SupplierTiming], list[Receipt], list[PurchaseLine]]:
+) -> tuple[dict[str, SupplierTiming], list[Receipt], list[PurchaseLine], dict[str, int]]:
     orders_by_supplier: dict[str, list[PurchaseLine]] = defaultdict(list)
+    quantities_by_sku: dict[str, list[float]] = defaultdict(list)
     for row in tables["purchase_orders"]:
         line = _purchase_line(row)
         if line.placed <= as_of:
             orders_by_supplier[line.supplier].append(line)
+            if line.ordered > 0:
+                quantities_by_sku[line.sku].append(line.ordered)
     receipts_by_supplier: dict[str, list[Receipt]] = defaultdict(list)
     for row in tables["receipts"]:
         receipt = _receipt(row)
@@ -202,7 +206,11 @@ def read_supply(
     orders = [
         line for group in orders_by_supplier.values() for line in group if as_of == cutoff
     ]
-    return timing, receipts, orders
+    multiples = {
+        sku: next((multiple for multiple in ORDER_MULTIPLES if all(qty % multiple == 0 for qty in quantities)), 1)
+        for sku, quantities in quantities_by_sku.items()
+    }
+    return timing, receipts, orders, multiples
 
 
 def classify_transit(

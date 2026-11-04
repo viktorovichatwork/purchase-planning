@@ -3,6 +3,7 @@ from datetime import date
 from html import escape
 from pathlib import Path
 
+from purchase_planning.calibration import METRIC_HEADERS
 from purchase_planning.comparison import Change, summarize
 from purchase_planning.facts import OrderFlag, PlanFacts, Segment
 from purchase_planning.order_sheet import supplier_orders
@@ -41,6 +42,23 @@ def _order_flags(facts: PlanFacts) -> str:
     return "<ul>" + "".join(f"<li>{flag} — {counts[flag]} SKU</li>" for flag in OrderFlag) + "</ul>"
 
 
+def _backtest_table(facts: PlanFacts) -> str:
+    result = facts.backtest
+    if result is None:
+        return f"<p>{escape(facts.backtest_warning or 'Результаты бэктеста отсутствуют.')}</p>"
+    warning = f"<p>{escape(facts.backtest_warning)}</p>" if facts.backtest_warning else ""
+    headers = "".join(f'<th scope="col">{label}</th>' for label in METRIC_HEADERS[1:])
+    rows = []
+    for row in result.metrics:
+        percentages = (row.wape, row.bias, row.baseline_wape, row.baseline_bias)
+        cells = "".join(f"<td>{value:.2%}</td>" if value is not None else "<td>—</td>" for value in percentages)
+        rows.append(f'<tr><th scope="row">{escape(row.group)}</th><td>{row.windows}</td>{cells}</tr>')
+    return (
+        f"{warning}<p>Срез бэктеста {result.cutoff:%d.%m.%Y} · {len(result.origins)} точек отсчёта</p>"
+        f"<table><thead><tr>{headers}</tr></thead><tbody>{''.join(rows)}</tbody></table>"
+    )
+
+
 def write_dashboard(
     facts: PlanFacts, path: Path, *, run_date: date, previous_run: str | None, changes: list[Change],
 ) -> None:
@@ -48,13 +66,17 @@ def write_dashboard(
     stale = age > STALE_EXPORT_DAYS
     status = "Черновик, не размещать" if stale else "Актуально"
     status_class = "draft" if stale else "current"
-    warnings = "".join(f"<p>{escape(warning)}</p>" for warning in (facts.cutoff_warning, facts.supply_warning) if warning)
+    warnings = "".join(
+        f"<p>{escape(warning)}</p>"
+        for warning in (facts.cutoff_warning, facts.supply_warning) if warning
+    )
     # Extend the dashboard by adding a section and its renderer here.
     sections = (
         ("Заказ по поставщикам", _order_table(facts)),
         ("Сегменты ассортимента", _segments(facts)),
         ("Флаги открытых заказов", _order_flags(facts)),
         ("Что изменилось с прошлого запуска", f"<p>{escape(summarize(previous_run, changes))}</p>"),
+        ("Бэктест", _backtest_table(facts)),
     )
     content = "\n".join(f"<section><h2>{title}</h2>{body}</section>" for title, body in sections)
     path.write_text(
