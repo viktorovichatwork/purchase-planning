@@ -349,7 +349,7 @@ def test_missing_metadata_uses_last_complete_month_and_warns_in_report(export):
     write_report(facts, path)
     workbook = load_workbook(path)
     try:
-        assert "Нет export_meta.json" in workbook["Заказ по поставщикам"]["B3"].value
+        assert "по последнему полному месяцу продаж" in workbook["Заказ по поставщикам"]["B3"].value
     finally:
         workbook.close()
 

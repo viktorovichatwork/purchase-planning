@@ -51,9 +51,7 @@ def _read_cutoff(path: Path, complete_months: list[date]) -> tuple[date, str | N
             raise ExportValidationError(
                 ["Нет export_meta.json и в продажах нет полного месяца для определения даты среза."]
             ) from None
-        return max(complete_months), (
-            "Нет export_meta.json. Дата среза принята равной последнему дню последнего полного месяца."
-        )
+        return max(complete_months), "Дата среза определена по последнему полному месяцу продаж."
     except (OSError, UnicodeError):
         raise ExportValidationError(["Не удалось прочитать export_meta.json в UTF-8."]) from None
 

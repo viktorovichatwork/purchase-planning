@@ -136,21 +136,6 @@ document.addEventListener("keydown", (event) => {
     }
 });
 
-const cutoffPicker = document.getElementById("cutoff-picker");
-const cutoffInput = cutoffPicker.querySelector("input");
-const cutoffDownload = cutoffPicker.querySelector("a");
-cutoffInput.addEventListener("input", () => {
-    if (!cutoffInput.validity.valid) {
-        cutoffDownload.removeAttribute("href");
-        cutoffDownload.setAttribute("aria-disabled", "true");
-        return;
-    }
-    const contents = JSON.stringify({ cutoff_date: cutoffInput.value }, null, 2) + "\\n";
-    cutoffDownload.href = "data:application/json;charset=utf-8," + encodeURIComponent(contents);
-    cutoffDownload.removeAttribute("aria-disabled");
-});
-cutoffPicker.hidden = false;
-
 const views = Array.from(document.querySelectorAll("[data-view]"));
 const nav = document.querySelector(".workspace-nav");
 const links = Array.from(nav.querySelectorAll("a"));
@@ -698,10 +683,6 @@ ul {{ margin: 0; padding-left: 1.25rem; }}
 .guide li a {{ display: inline; }}
 .upload-steps > li + li {{ margin-top: 1.15rem; }}
 .upload-steps h3 {{ margin: 0 0 .35rem; }}
-.cutoff-picker {{ display: flex; align-items: end; flex-wrap: wrap; gap: .6rem .75rem; margin: .75rem 0; }}
-.cutoff-picker label {{ display: grid; gap: .25rem; font-size: .875rem; font-weight: 650; }}
-.cutoff-picker a.download {{ display: inline-flex; align-items: center; min-height: 44px; }}
-.cutoff-picker a[aria-disabled] {{ background: var(--subtle); color: var(--muted); }}
 @media (max-width: 40rem) {{
     h1 {{ font-size: 1.65rem; }}
     .decision {{ gap: 0 .6rem; }}
@@ -760,27 +741,13 @@ ul {{ margin: 0; padding-left: 1.25rem; }}
 <p>Возьмите свежую обезличенную выгрузку из ERP. Проверьте, что в ней есть {csv_files}.</p>
 </li>
 <li>
-<h3>Укажите, по какой день есть данные</h3>
-<p>Выберите последний день, который включён в выгрузку. Например, если данные в ней по 13 августа, укажите 13 августа, даже если выгрузили их позже.</p>
-<p>Исходный набор содержит шесть CSV. Портал создаёт отдельный файл <code>export_meta.json</code> с выбранной датой.</p>
-<div class="cutoff-picker" id="cutoff-picker" hidden="">
-<label>Дата среза<input type="date" name="cutoff_date" required="" /></label>
-<a class="download" download="export_meta.json" aria-disabled="true">Скачать export_meta.json</a>
-</div>
-<details>
-<summary>Как создать файл вручную</summary>
-<p>Сохраните в UTF-8 файл с именем <code>export_meta.json</code> и содержимым <code>{{"cutoff_date":"2026-08-13"}}</code>. Замените дату из примера на свою в формате <code>ГГГГ-ММ-ДД</code>.</p>
-<p>Если файла даты вообще нет в папке выгрузки, расчёт берёт последний день последнего полного месяца продаж. Дату среза внутри неполного месяца можно указать в файле.</p>
-</details>
-</li>
-<li>
 <h3>Загрузите файлы в GitHub</h3>
-<p>Откройте <a href="{_REPOSITORY_URL}/tree/main/inbox">папку inbox ветки main</a> и выберите <strong>Add file → Upload files</strong>. Добавьте шесть CSV и новый <code>export_meta.json</code> с прежними именами. Нажмите <strong>Commit changes</strong>, чтобы сохранить их вместе в <code>main</code>. Нужен доступ на запись.</p>
-<p>В папке уже есть файл даты от предыдущей выгрузки. Замените его вместе с CSV, иначе расчёт возьмёт старую дату.</p>
+<p>Откройте <a href="{_REPOSITORY_URL}/tree/main/inbox">папку inbox ветки main</a> и выберите <strong>Add file → Upload files</strong>. Добавьте все шесть CSV с прежними именами. Нажмите <strong>Commit changes</strong>, чтобы сохранить их вместе в <code>main</code>. Нужен доступ на запись.</p>
 </li>
 <li>
 <h3>Проверьте результат</h3>
 <p>Откройте <a href="{_REPOSITORY_URL}/actions/workflows/publish.yml">страницу расчётов в GitHub Actions</a>. Когда новый запуск завершится успешно, обновите портал и сверьте дату среза.</p>
+<p>Портал сам определяет дату среза по продажам. Если последний месяц в CSV неполный, срез приходится на последний день предыдущего полного месяца.</p>
 </li>
 </ol>
 <p><a href="#guide">Вернуться к инструкции по работе с порталом</a></p>
