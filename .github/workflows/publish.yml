@@ -37,7 +37,8 @@ jobs:
           EXPLABS_MODEL: ${{ vars.EXPLABS_MODEL }}
         run: |
           set -euo pipefail
-          export PURCHASE_CODE_REVISION="$(git rev-parse HEAD)"
+          PURCHASE_CODE_REVISION="$(git rev-parse HEAD)"
+          export PURCHASE_CODE_REVISION
           if [[ -d runs ]]; then
             last_run="$(find runs -mindepth 2 -maxdepth 2 -name run.json | sort -V | tail -n 1)"
             if [[ -n "$last_run" ]]; then
