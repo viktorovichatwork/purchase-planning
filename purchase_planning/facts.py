@@ -11,6 +11,11 @@ class Segment(StrEnum):
     PURCHASE = "К закупке"
 
 
+class OrderFlag(StrEnum):
+    STUCK = "Зависший заказ"
+    TAIL = "Хвост заказа"
+
+
 @dataclass(frozen=True)
 class CategoryProfile:
     category: str
@@ -61,6 +66,7 @@ class SupplierSummary:
     timing: SupplierTiming
     order_qty: float
     time_to_order: bool
+    next_order_date: date | None = None
 
 
 @dataclass(frozen=True)

@@ -579,6 +579,8 @@ def test_run_history_compares_the_same_export_and_preserves_parameters(export, t
     first = run_plan(export, history)
     second = run_plan(export, history)
     assert first != second
+    assert "Первый запуск" in (first / "index.html").read_text(encoding="utf-8")
+    assert "Изменений нет" in (second / "index.html").read_text(encoding="utf-8")
     assert (first / "facts.json").read_bytes() == (second / "facts.json").read_bytes()
     assert json.loads((first / "diff.json").read_text(encoding="utf-8"))["previous_run"] is None
     assert json.loads((second / "diff.json").read_text(encoding="utf-8")) == {

@@ -6,7 +6,8 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from purchase_planning.comparison import DRIVER_LABELS, Change, compare, comparison_evidence
+from purchase_planning.comparison import compare, comparison_evidence, summarize
+from purchase_planning.dashboard import write_dashboard
 from purchase_planning.export import ExportValidationError
 from purchase_planning.facts import Segment
 from purchase_planning.parameters import run_parameters
@@ -57,28 +58,12 @@ def run_plan(data_dir: str | Path, history_dir: str | Path) -> Path:
         _write_json(staging / "diff.json", {"previous_run": previous.name if previous else None, "changes": changes})
         _write_json(staging / "run.json", {"started_at": started_at.isoformat(), "run_date": run_date.isoformat()})
         write_report(facts, staging / "report.xlsx", run_date=run_date, parameters=parameters)
+        write_dashboard(
+            facts, staging / "index.html", run_date=run_date,
+            previous_run=previous.name if previous else None, changes=changes,
+        )
         staging.rename(result)
     return result
-
-
-def summarize(previous: str | None, changes: list[Change]) -> str:
-    if previous is None:
-        return "Первый запуск, истории для сравнения нет."
-    if not changes:
-        return "Изменений нет."
-
-    quantities = sum(row["order_qty"][0] != row["order_qty"][1] for row in changes)
-    segments = sum(row["segment"][0] != row["segment"][1] for row in changes)
-    new_risks = sum(not before and after for before, after in (row["stockout_risk"] for row in changes))
-    resolved_risks = sum(before and not after for before, after in (row["stockout_risk"] for row in changes))
-    counts = {label: sum(code in row["drivers"] for row in changes) for code, label in DRIVER_LABELS.items()}
-    causes = ", ".join(f"{label} — {count}" for label, count in counts.items() if count)
-    unconfirmed = sum(bool(row["flags"]) for row in changes)
-    return (
-        f"К заказу изменилось у {quantities} SKU, сегмент — у {segments}. "
-        f"Новые риски — {new_risks}, ушедшие — {resolved_risks}.\n"
-        f"Наблюдаемые причины — {causes or 'нет'}. Без подтверждённой причины — {unconfirmed}."
-    )
 
 
 def main() -> int:
@@ -93,6 +78,7 @@ def main() -> int:
         return 1
     diff = _read_json(result / "diff.json")
     print(f"Отчёт: {result / 'report.xlsx'}")
+    print(f"Страница: {result / 'index.html'}")
     print(summarize(diff["previous_run"], diff["changes"]))
     return 0
 
