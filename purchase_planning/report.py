@@ -7,6 +7,7 @@ from openpyxl import Workbook
 from openpyxl.styles import Font
 from openpyxl.worksheet.worksheet import Worksheet
 
+from purchase_planning.actions import Action, action, todo_text, why_text
 from purchase_planning.calibration import METRIC_HEADERS, stock_multiplier
 from purchase_planning.facts import UNCONFIRMED_ORDERS_LABEL, OrderFlag, PlanFacts, Recommendation, Segment
 from purchase_planning.order_sheet import (
@@ -69,14 +70,14 @@ def write_report(
         "Мало данных", "Плечо, дней", "Источник плеча", "Цикл, дней",
         "Остаток на дату расчёта", "Дата прихода нового заказа", "Остаток на дату прихода",
         "В пути по месяцам", "Флаги заказов", "Флаги поставщика", "Пора заказывать у поставщика",
-        "Сегмент", "Новинка", "Наценка за 12 мес, %", "Продажи за 12 мес, шт.",
+        "Что делать", "Новинка", "Наценка за 12 мес, %", "Продажи за 12 мес, шт.",
         "Оценка спроса в год, шт.", "Флаги SKU",
         "Целевой запас", "Страховой запас", "Тип спроса", "К заказу до округления, шт.", "Кратность",
         "Покрытие, мес", "Хватит до", "Заказать не позже", "Дата заказа у поставщика",
         "Обычное пополнение, шт.", "Сезонный заказ, шт.", "Крайний срок сезонной партии",
         "Размещение обычной партии",
     )
-    sheet.append((*headers, "Подтверждение байера"))
+    sheet.append((*headers, f"{Action.DECIDE}: почему"))
     confirmation_column = sheet.cell(row=sheet.max_row, column=len(headers) + 1).column_letter
     sheet.column_dimensions[confirmation_column].width = 26
     summaries = {supplier.supplier_id: supplier for supplier in facts.suppliers}
@@ -85,12 +86,16 @@ def write_report(
         "Поставщик", "SKU", "Товар", *(f"Прогноз {month:%Y-%m}" for month in facts.forecast_months),
         "Покрытие, мес", "Хватит до", "Заказать не позже",
     ))
-    segment_sheets: dict[Segment, Worksheet] = {}
-    for segment in Segment:
-        if segment != Segment.PURCHASE:
-            segment_sheets[segment] = workbook.create_sheet(segment)
-            segment_sheets[segment].append(headers)
-    for sku_sheet in (sheet, forecast_sheet, *segment_sheets.values()):
+    action_headers = ("Почему", "Что сделать", *headers)
+    action_sheets: dict[Action, Worksheet] = {}
+    for group in (Action.DECIDE, Action.SKIP):
+        action_sheets[group] = workbook.create_sheet(group)
+        action_sheets[group].append(action_headers)
+        action_sheets[group].column_dimensions["A"].width = 60
+        action_sheets[group].column_dimensions["B"].width = 45
+        action_sheets[group].column_dimensions["E"].width = 48
+        action_sheets[group].freeze_panes = "C2"
+    for sku_sheet in (sheet, forecast_sheet):
         sku_sheet.column_dimensions["C"].width = 48
     orders = supplier_orders(facts)
     supplier_dates = {}
@@ -124,7 +129,7 @@ def write_report(
             transit or None, ", ".join(row.order_flags) or None,
             (", ".join(timing.flags) or None) if timing else None,
             ("Да" if summary.time_to_order else "Нет") if summary else None,
-            row.segment, "Да" if row.is_new else None,
+            action(row), "Да" if row.is_new else None,
             round(row.markup_pct_12m, 1) if row.markup_pct_12m is not None else None,
             round(row.sales_qty_12m), round(row.annual_demand_qty), ", ".join(row.sku_flags) or None,
             row.target_stock, row.safety_stock,
@@ -140,16 +145,20 @@ def write_report(
             ),
             _sku_order_date(row, regular_placement or facts.as_of, facts.as_of) if row.regular_order_qty else None,
         )
+        offset = 0
         if target is sheet:
-            values += ("Требует подтверждения" if row.segment == Segment.CONDITIONAL else None,)
+            values += (why_text(row) if action(row) == Action.DECIDE else None,)
+        else:
+            values = (why_text(row), todo_text(row), *values)
+            offset = 2
         target.append(values)
-        for cell in target[target.max_row][:3]:
+        for cell in target[target.max_row][offset:offset + 3]:
             cell.data_type = "s"
         for header in ("Остаток на дату прихода", "Целевой запас", "Страховой запас"):
-            target.cell(target.max_row, headers.index(header) + 1).number_format = "0"
-        target.cell(target.max_row, headers.index("Наценка за 12 мес, %") + 1).number_format = "0.0"
-        target.cell(target.max_row, headers.index("К заказу до округления, шт.") + 1).number_format = "0"
-        target.cell(target.max_row, headers.index("Покрытие, мес") + 1).number_format = "0.0"
+            target.cell(target.max_row, offset + headers.index(header) + 1).number_format = "0"
+        target.cell(target.max_row, offset + headers.index("Наценка за 12 мес, %") + 1).number_format = "0.0"
+        target.cell(target.max_row, offset + headers.index("К заказу до округления, шт.") + 1).number_format = "0"
+        target.cell(target.max_row, offset + headers.index("Покрытие, мес") + 1).number_format = "0.0"
 
     for supplier, group, total in orders:
         for row in group:
@@ -177,14 +186,13 @@ def write_report(
         forecast_sheet.cell(forecast_sheet.max_row, 4 + len(facts.forecast_months)).number_format = "0.0"
         for cell in forecast_sheet[forecast_sheet.max_row][:3]:
             cell.data_type = "s"
-        if row.segment not in {Segment.PURCHASE, Segment.REVIEW}:
-            append_sku(segment_sheets[row.segment], row)
-    review = sorted(
-        (row for row in facts.recommendations if row.segment == Segment.REVIEW),
-        key=lambda row: (-row.sales_qty_12m, row.sku_id),
-    )
-    for row in review:
-        append_sku(segment_sheets[Segment.REVIEW], row)
+    for group, target in action_sheets.items():
+        # The largest sellers first: they matter most for the buyer's decision.
+        for row in sorted(
+            (row for row in facts.recommendations if action(row) == group),
+            key=lambda row: (-displayed_order_qty(row), -row.sales_qty_12m, row.sku_id),
+        ):
+            append_sku(target, row)
 
     _append_inventory_sheets(workbook, facts, labels)
     _append_backtest(workbook.create_sheet("Бэктест"), facts)

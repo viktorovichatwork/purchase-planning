@@ -4,7 +4,7 @@ from enum import StrEnum
 
 
 ESTIMATED_CUTOFF_SOURCE = "оценка по продажам неполного месяца"
-UNCONFIRMED_ORDERS_LABEL = "Не подтверждены поставщиком, строк заказов"
+UNCONFIRMED_ORDERS_LABEL = "Подтверждение в ERP не заполнено, строк заказов"
 
 
 class Segment(StrEnum):
@@ -15,10 +15,15 @@ class Segment(StrEnum):
     PURCHASE = "К закупке"
 
 
+NO_SUPPLIER_FLAG = "Поставщик не указан"
+TYPICAL_TIMING_FLAG = "Срок поставки неизвестен: расчёт по типичному сроку"
+TYPICAL_TIMING_SOURCE = "Типичный срок по всем поставщикам"
+
+
 class OrderFlag(StrEnum):
     STUCK = "Зависший заказ"
     TAIL = "Хвост заказа"
-    UNCONFIRMED = "Не подтверждён поставщиком"
+    UNCONFIRMED = "Подтверждение в ERP не заполнено"
     RESCHEDULE = "Перенести/отменить открытый заказ"
 
 

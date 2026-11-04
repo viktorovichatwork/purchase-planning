@@ -1,17 +1,21 @@
 import json
 from calendar import monthrange
 from collections import defaultdict
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, replace
 from datetime import date, timedelta
-from math import fsum
+from math import ceil, fsum
 from pathlib import Path
+from statistics import median
 
 from purchase_planning.calibration import read_backtest
-from purchase_planning.demand import apply_analog_levels, category_profiles, estimate_sku_demand
+from purchase_planning.demand import (
+    DEMAND_WINDOW_MONTHS, LONG_STOCKOUT_MONTHS, apply_analog_levels, category_profiles, estimate_sku_demand,
+)
 from purchase_planning.export import ExportValidationError, finite_quantity, read_export
 from purchase_planning.facts import (
-    ESTIMATED_CUTOFF_SOURCE, DemandType, OrderFlag, PlanFacts, Recommendation, Segment, SupplierSummary,
+    ESTIMATED_CUTOFF_SOURCE, NO_SUPPLIER_FLAG, TYPICAL_TIMING_FLAG, TYPICAL_TIMING_SOURCE, DemandType, OrderFlag,
+    PlanFacts, Recommendation, Segment, SupplierSummary, SupplierTiming,
 )
 from purchase_planning.inventory import forecast_period, project_stock
 from purchase_planning.order_sheet import displayed_order_qty
@@ -33,6 +37,16 @@ class Calculation:
 def _month_end(month: str) -> date:
     first = date.fromisoformat(f"{month}-01")
     return first.replace(day=monthrange(first.year, first.month)[1])
+
+
+def _typical_timing(timings: Iterable[SupplierTiming]) -> SupplierTiming | None:
+    known = [terms for terms in timings if terms.horizon_days is not None]
+    if not known:
+        return None
+    return SupplierTiming(
+        ceil(median(terms.lead_days for terms in known)), TYPICAL_TIMING_SOURCE,
+        ceil(median(terms.cycle_days for terms in known)),
+    )
 
 
 def _complete_stock_months(as_of: date, partial_months: set[date]) -> tuple[date, ...]:
@@ -218,7 +232,7 @@ def calculate(
                 first_sales[sku] = min(first_sales.get(sku, month), month)
 
     profiles = category_profiles(sku_categories, net_sales)
-    history_months = _complete_stock_months(calculation_date, partial_months)
+    history_months = _complete_stock_months(calculation_date, partial_months)[-DEMAND_WINDOW_MONTHS:]
     own_demand = {
         sku: estimate_sku_demand(
             sku, profiles[category], history_months, net_sales, gross_sales, stock, first_sales.get(sku),
@@ -244,6 +258,8 @@ def calculate(
         if month_start <= receipt.received:
             month_receipts[receipt.sku][receipt.received] += receipt.qty
 
+    typical_timing = _typical_timing(timing.values())
+    typical_skus: set[str] = set()
     sku_plans: list[tuple[Recommendation, dict[date, float]]] = []
     for sku_row in sorted(sku_rows, key=lambda row: (row["supplier_id"], row["sku_id"])):
         sku = sku_row["sku_id"]
@@ -265,21 +281,32 @@ def calculate(
         for day, quantity in sorted(arrivals.items()):
             monthly_transit[day.replace(day=1)] += quantity
         supplier_timing = timing[supplier]
-        lead, cycle = supplier_timing.lead_days, supplier_timing.cycle_days
         assortment = classify_sku(
             sales_by_sku[sku], first_sales.get(sku), as_of=calculation_date,
             last_complete_month=last_complete_month, had_recent_stock=sku in recent_stock or current_stock > 0,
             low_data=demand.low_data,
             previous_segment=previous_segments.get(sku) if previous_segments is not None else None,
         )
+        segment = assortment.segment
         flags = list(assortment.flags)
         unknown_supplier = not supplier or sku_row["supply_type"] == "unknown"
         if unknown_supplier:
-            flags.append("Поставщик не указан")
+            flags.append(NO_SUPPLIER_FLAG)
+        selling = segment in {Segment.PURCHASE, Segment.CONDITIONAL} and assortment.sales_qty_12m > 0
+        unknown_timing = unknown_supplier or supplier_timing.horizon_days is None
+        if selling and unknown_timing and typical_timing is not None:
+            # The buyer has to name a supplier. Until then the order is sized on a typical supplier.
+            supplier_timing, unknown_supplier = typical_timing, False
+            typical_skus.add(sku)
+            segment = Segment.CONDITIONAL
+            flags.append(f"{TYPICAL_TIMING_FLAG} {typical_timing.lead_days} дн.")
+        lead, cycle = supplier_timing.lead_days, supplier_timing.cycle_days
         if lead is None:
             flags.append("Не определено плечо поставки")
         if cycle is None:
             flags.append("Нет истории для цикла")
+        if selling and demand.excluded_stockout_months >= LONG_STOCKOUT_MONTHS:
+            segment = Segment.CONDITIONAL
         try:
             decile = float(sku_row["price_decile"])
             price_decile = int(decile) if decile in range(1, 11) else None
@@ -293,7 +320,7 @@ def calculate(
                 sku_id=sku, supplier_id=supplier, order_qty=0.0,
                 excluded_stockout_months=demand.excluded_stockout_months, low_data=demand.low_data,
                 stock_at_calculation=current_stock, in_transit_by_month=tuple(monthly_transit.items()),
-                order_flags=tuple(sorted(order_flags.get(sku, ()))), segment=assortment.segment, is_new=assortment.is_new,
+                order_flags=tuple(sorted(order_flags.get(sku, ()))), segment=segment, is_new=assortment.is_new,
                 markup_pct_12m=assortment.markup_pct_12m, sales_qty_12m=assortment.sales_qty_12m,
                 sku_flags=tuple(flags), annual_demand_qty=annual_level, category=profile.category,
                 demand_type=demand.demand_type, order_multiple=order_multiples.get(sku, 1), price_decile=price_decile,
@@ -310,7 +337,10 @@ def calculate(
     quantities_by_supplier: dict[str, list[float]] = defaultdict(list)
     dates_by_supplier: dict[str, list[date]] = defaultdict(list)
     for index, (row, forecast) in enumerate(sku_plans):
-        if row.demand_type == DemandType.REGULAR and not profiles[row.category].is_seasonal:
+        if (
+            row.demand_type == DemandType.REGULAR and not profiles[row.category].is_seasonal
+            and row.sku_id not in typical_skus
+        ):
             batch = matching_seasonal_batch(row, season_batches[row.supplier_id], calculation_date)
             if batch is not None:
                 # Recompute against the stock on the grouped batch's arrival date.

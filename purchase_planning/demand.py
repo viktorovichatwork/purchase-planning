@@ -14,6 +14,10 @@ SEASON_PEAK_MONTHS = 3
 SEASON_PEAK_SHARE = 0.5
 SEASON_WINDOW_SHARE = 0.8
 MIN_OWN_DEMAND_MONTHS = 3
+# Demand level comes from the latest full months only: the assortment rotates fast.
+DEMAND_WINDOW_MONTHS = 12
+# A SKU missing from stock this many months of the window needs the buyer's check.
+LONG_STOCKOUT_MONTHS = 6
 SBC_ADI_THRESHOLD = 1.32
 SBC_CV2_THRESHOLD = 0.49
 

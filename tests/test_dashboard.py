@@ -46,10 +46,14 @@ def test_dashboard_matches_workbook_and_displays_facts(tmp_path):
         cutoff_row, _, _, headers, *rows = workbook.active.values
         assert cutoff_row[:2] == ("Дата среза", f"≈ 13.08.2026 · {ESTIMATED_CUTOFF_SOURCE}")
         assert dict(workbook["Сводка"].values)[UNCONFIRMED_ORDERS_LABEL] == 2
-        confirmation = headers.index("Подтверждение байера")
+        confirmation = headers.index("Решить закупщику: почему")
         assert {row[1]: row[confirmation] for row in rows if row[1] != "Итого"} == {
-            "SKU-1": None, "SKU-2": "Требует подтверждения", "SKU-3": None,
+            "SKU-1": None, "SKU-2": "Наценка 22,0% — ниже 25%", "SKU-3": None,
         }
+        _, decide = workbook["Решить закупщику"].values
+        assert decide[:4] == (
+            "Наценка 22,0% — ниже 25%", "Согласовать цену или принять низкую наценку", "А<&", "SKU-2",
+        )
         order_flags = headers.index("Флаги заказов")
         assert next(row[order_flags] for row in rows if row[1] == "SKU-2") == OrderFlag.UNCONFIRMED
     finally:
@@ -62,13 +66,15 @@ def test_dashboard_matches_workbook_and_displays_facts(tmp_path):
     assert page.find(".//header//a[@class='upload-action primary']").get("href") == "#upload"
     assert page.find(".//header//a[@href='report.xlsx']").text == "Скачать черновик XLSX"
     confirmation = page.find(".//section[@class='confirmation']")
-    assert confirmation.find("h3").text == "Требуют подтверждения"
-    assert confirmation.find(".//small[@class='confirmation-reason']").text == "Наценка ниже 25%"
+    assert confirmation.find("h3").text == "Решить закупщику"
+    assert confirmation.find(".//small[@class='confirmation-reason']").text == (
+        "Наценка 22,0% — ниже 25% → Согласовать цену или принять низкую наценку"
+    )
     assert "6 шт. к заказу" in "".join(confirmation.itertext())
-    metrics = {metric.find("dt").text: metric.find("dd").text for metric in page.findall(".//dl[@class='decision']/div")}
+    metrics = {metric.find("dt").text: "".join(metric.find("dd").itertext()) for metric in page.findall(".//dl[@class='decision']/div")}
     assert metrics["Рекомендация на дату среза, шт."] == "3"
-    assert metrics["Требуют подтверждения, шт."] == "6"
-    assert metrics[UNCONFIRMED_ORDERS_LABEL] == "2"
+    assert metrics["Решить закупщику, шт."] == "6"
+    assert UNCONFIRMED_ORDERS_LABEL not in metrics
     visible_text = "".join(page.itertext())
     assert page.find(".//a[@href='#guide']") is not None
     assert page.find(".//section[@id='guide']/h2").text == "Как работать с порталом"
@@ -81,7 +87,7 @@ def test_dashboard_matches_workbook_and_displays_facts(tmp_path):
     assert "export_meta.json" not in "".join(upload.itertext())
     assert "Устаревшая выгрузка — черновик, не размещать" in "".join(page.find(".//header").itertext())
     for value in (f"Срез ≈ 13.08.2026 · {ESTIMATED_CUTOFF_SOURCE}", "36 дней", "Первый запуск",
-                  "Зависший заказ", "Хвост заказа", "Условно к закупке", OrderFlag.UNCONFIRMED):
+                  "Зависший заказ", "Хвост заказа", "Решить закупщику", OrderFlag.UNCONFIRMED):
         assert value in visible_text
 
 
@@ -159,9 +165,9 @@ def test_dashboard_splits_supplier_batches_and_uses_calendar_dates_in_decision(t
     assert "запас ниже точки заказа" in "".join(suppliers[0].itertext())
     assert "опоздание" not in "".join(page.itertext())
     assert "2 дня на дату запуска" in "".join(page.itertext())
-    metrics = {metric.find("dt").text: metric.find("dd").text for metric in page.findall(".//dl[@class='decision']/div")}
+    metrics = {metric.find("dt").text: "".join(metric.find("dd").itertext()) for metric in page.findall(".//dl[@class='decision']/div")}
     assert metrics["К заказу сейчас, шт."] == "3"
-    assert metrics["Требуют подтверждения, шт."] == "0"
+    assert metrics["Решить закупщику, шт."] == "0"
     assert metrics["Сезонные партии с крайним сроком в ближайшие 90 дней, шт."] == "12"
     assert metrics["Поставщиков в следующие 30 дней"] == "2"
     primary_action = page.find(".//header//a[@class='primary']")
@@ -169,7 +175,7 @@ def test_dashboard_splits_supplier_batches_and_uses_calendar_dates_in_decision(t
     assert primary_action.text == "Проверить заказ по поставщикам"
     assert page.find(".//header//a[@href='report.xlsx']").text == "Скачать XLSX"
     assert {link.get("href"): link.text for link in page.findall(".//section[@id='overview']//dd/a")} == {
-        "#orders": "1", "#risks": "0",
+        "#orders": "1", "#decide": "0", "#risks": "0",
     }
     calendar = page.findall(".//{http://www.w3.org/2000/svg}text")
     assert [node.text for node in calendar[:4]] == ["авг. 2026", "1", "сент. 2026", "3"]
@@ -238,7 +244,7 @@ def test_analytics_terms_have_descriptions(tmp_path):
     write_dashboard(facts, dashboard, run_date=day, previous_run=None, changes=[])
 
     page = ElementTree.fromstring(dashboard.read_text(encoding="utf-8").split("\n", 1)[1])
-    for section, count in (("forecast-quality", 2), ("stock", 3), ("segments", 5), ("order-flags", 4)):
+    for section, count in (("forecast-quality", 2), ("stock", 3), ("segments", 3), ("order-flags", 4)):
         node = page.find(f".//section[@id='{section}']")
         descriptions = {hint.attrib["id"]: hint.text for hint in node.findall(".//span[@role='tooltip']")}
         buttons = node.findall(".//button[@aria-describedby]")

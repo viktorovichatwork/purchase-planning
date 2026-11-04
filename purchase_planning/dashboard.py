@@ -6,17 +6,17 @@ from html import escape
 from math import fsum
 from pathlib import Path
 
+from purchase_planning.actions import ACTION_HINTS, Action, action, decision_points, todo_text, why_text
 from purchase_planning.comparison import Change, summarize
 from purchase_planning.explanations import Explanations
 from purchase_planning.export import REQUIRED_COLUMNS
-from purchase_planning.facts import UNCONFIRMED_ORDERS_LABEL, OrderFlag, PlanFacts, Recommendation, SeasonStatus, Segment
+from purchase_planning.facts import OrderFlag, PlanFacts, Recommendation, Segment
 from purchase_planning.order_sheet import (
     coverage_text, displayed_order_qty, excess_rows, order_date_label, rounded_quantity, stock_below_reorder_point,
     stockout_rows, supplier_orders,
 )
 from purchase_planning.parameters import STALE_EXPORT_DAYS, STALE_EXPORT_STATUS
 from purchase_planning.replenishment import inventory_summary
-from purchase_planning.segments import PURCHASE_MARKUP_PCT
 from purchase_planning.sku_labels import category_name
 from purchase_planning.wording import days_text
 
@@ -29,20 +29,12 @@ _INVENTORY_HINTS = {
     "Риски дефицита": "По прогнозу товар закончится раньше, чем придёт новый заказ, "
                       "если разместить его на дату расчёта.",
 }
-_SEGMENT_HINTS = {
-    Segment.DEAD: "За последние 12 месяцев продаж не было, хотя товар был на складе.",
-    Segment.SLEEPING: "Товар продавался раньше. За последние 12 месяцев продаж и остатков не было.",
-    Segment.REVIEW: "Проверьте цену и себестоимость. Причина может быть в низкой наценке, "
-                    "неизвестной себестоимости или незавершённом пересмотре.",
-    Segment.CONDITIONAL: "Проверьте рекомендацию перед заказом. Подтверждение байера нужно, "
-                         "если мало данных, наценка чуть ниже порога или сезонный заказ запоздал.",
-    Segment.PURCHASE: "Позиция проходит отбор для закупки. Количество и дату заказа смотрите у поставщика.",
-}
 _FLAG_HINTS = {
     OrderFlag.STUCK: "Заказ давно просрочен, существенная часть не пришла. "
                      "Уточните у поставщика, будет ли поставка. Пока её не учитывают в пути.",
-    OrderFlag.UNCONFIRMED: "Подтверждённое поставщиком количество равно нулю. "
-                         "Такие строки учитываются в пути по общим правилам.",
+    OrderFlag.UNCONFIRMED: "В ERP у открытого заказа не заполнено подтверждённое количество. "
+                           "Часто товар по таким заказам уже приходит: поле просто не заполняют. "
+                           "Строки учитываются в пути по общим правилам.",
     OrderFlag.TAIL: "Основная часть давно просроченного заказа пришла. "
                     "Небольшой остаток не учитывают в пути. Проверьте, можно ли закрыть заказ.",
     OrderFlag.RESCHEDULE: "По SKU есть избыток и открытый заказ. "
@@ -275,21 +267,6 @@ def _table(
     return _browse(table, "Поиск по SKU, категории, бренду или поставщику") if sku_labels is not None else table
 
 
-def _confirmation_reason(row: Recommendation) -> str:
-    reasons = []
-    if row.low_data:
-        reasons.append("Мало данных для прогноза")
-    if "Мало данных о наценке" in row.sku_flags:
-        reasons.append("Мало данных о наценке")
-    if row.markup_pct_12m is not None and row.markup_pct_12m < PURCHASE_MARKUP_PCT:
-        reasons.append(f"Наценка ниже {PURCHASE_MARKUP_PCT}%")
-    if row.seasonal_order and row.seasonal_order.status == SeasonStatus.LATE:
-        reasons.append("Поздний заказ")
-    if row.seasonal_order and row.seasonal_order.status == SeasonStatus.NOT_RECOMMENDED:
-        reasons.append("Сезонная партия не рекомендована")
-    return " · ".join(reasons) or "Проверьте рекомендацию перед размещением заказа."
-
-
 def _sku(
     row: Recommendation, facts: PlanFacts, explanation: str, supplier_flags: tuple[str, ...],
     labels: Mapping[str, str],
@@ -305,17 +282,17 @@ def _sku(
             row.order_by, facts.as_of, date_format="%d.%m.%Y", below_reorder_point=stock_below_reorder_point(row),
         ) if row.order_by else "—"),
         ("Покрытие, мес", coverage_text(row)),
-        ("Сегмент", row.segment),
+        ("Что делать", action(row)),
         ("Флаги", ", ".join(dict.fromkeys((*row.order_flags, *row.sku_flags, *supplier_flags))) or "—"),
     )
     fields_html = "".join(f"<dt>{label}</dt><dd>{escape(str(value))}</dd>" for label, value in fields)
     why = f"<p><strong>Пояснение LLM</strong> · {escape(explanation)}</p>" if explanation else ""
     sku = escape(row.sku_id)
     search = _search_key(row.sku_id, labels.get(row.sku_id, ""))
-    reason = (
-        f'<small class="confirmation-reason">{escape(_confirmation_reason(row))}</small>'
-        if row.segment == Segment.CONDITIONAL else ""
-    )
+    reason = "".join(
+        f'<small class="confirmation-reason">{escape(why)} → {escape(todo)}</small>'
+        for why, todo in decision_points(row)
+    ) if action(row) == Action.DECIDE else ""
     return (
         f'<li data-search="{search}"><details class="sku-detail"><summary>'
         f'<span class="sku-heading"><strong>{sku}</strong>'
@@ -346,12 +323,12 @@ def _order_table(
             batch_lines.append(f'<span class="batch">{label} — {batch_date} — {quantity} шт.</span>')
         ordinary, conditional = [], []
         for row in schedule.lines:
-            target = conditional if row.segment == Segment.CONDITIONAL else ordinary
+            target = conditional if action(row) == Action.DECIDE else ordinary
             target.append(_sku(row, facts, explanations.get(row.sku_id, ""), schedule.flags, labels))
         sku_groups = f'<section><ul class="skus">{"".join(ordinary)}</ul></section>' if ordinary else ""
         if conditional:
             sku_groups += (
-                '<section class="confirmation"><h3>Требуют подтверждения</h3>'
+                f'<section class="confirmation"><h3>{Action.DECIDE}</h3>'
                 f'<ul class="skus">{"".join(conditional)}</ul></section>'
             )
         entries = _browse(f'<div class="sku-groups" data-entries="">{sku_groups}</div>')
@@ -389,9 +366,8 @@ def _decision(
     metrics = (
         ("Поставщиков пора заказывать", due, "#orders"),
         ("Рекомендация на дату среза, шт." if stale else "К заказу сейчас, шт.", units_now, ""),
-        ("Требуют подтверждения, шт.", units_to_confirm, ""),
+        (f"{Action.DECIDE}, шт.", units_to_confirm, "#decide"),
         ("SKU в риске дефицита", len(stockout_rows(facts)), "#risks"),
-        (UNCONFIRMED_ORDERS_LABEL, facts.unconfirmed_order_lines, ""),
     )
     additional = (
         ("Поставщиков в следующие 30 дней", soon, ""),
@@ -509,9 +485,31 @@ def _hint_list(prefix: str, entries: Iterable[tuple[str, str]]) -> str:
     return f'<ul class="hint-list">{items}</ul>'
 
 
-def _segments(facts: PlanFacts) -> str:
-    counts = Counter(row.segment for row in facts.recommendations)
-    return _hint_list("segment", ((f"{segment} — {counts[segment]} SKU", _SEGMENT_HINTS[segment]) for segment in Segment))
+def _actions(facts: PlanFacts) -> str:
+    counts = Counter(action(row) for row in facts.recommendations)
+    skipped = Counter(row.segment for row in facts.recommendations if action(row) == Action.SKIP)
+    groups = _hint_list("action", ((f"{group} — {counts[group]} SKU", ACTION_HINTS[group]) for group in Action))
+    details = " · ".join(
+        f"{segment} — {skipped[segment]}" for segment in (Segment.DEAD, Segment.SLEEPING, Segment.REVIEW)
+    )
+    return f'{groups}<p class="meta">{Action.SKIP}: {escape(details)}. Список с причинами — в XLSX.</p>'
+
+
+def _decide(facts: PlanFacts, labels: Mapping[str, str]) -> str:
+    rows = sorted(
+        (row for row in facts.recommendations if action(row) == Action.DECIDE),
+        key=lambda row: (-displayed_order_qty(row), row.sku_id),
+    )
+    intro = (
+        '<p class="meta">Количество посчитано, но заказ размещается только после решения закупщика. '
+        "Если решение «заказать» — добавьте позицию в заказ поставщику.</p>"
+    )
+    return intro + _table(
+        Action.DECIDE, ("SKU", "Поставщик", "К заказу, шт.", "Почему", "Что сделать"),
+        ((row.sku_id, row.supplier_id or "Поставщик не указан", displayed_order_qty(row), why_text(row), todo_text(row))
+         for row in rows),
+        sku_labels=labels,
+    )
 
 
 def _order_flags(facts: PlanFacts) -> str:
@@ -577,6 +575,7 @@ def write_dashboard(
     overview = _decision(facts, schedules, previous_run, changes, explanations.summary if explanations else "", stale=stale)
     workspace = (
         ("orders", "Заказ по поставщикам", _order_table(facts, schedules, explanations.rows if explanations else {}, labels)),
+        ("decide", Action.DECIDE, _decide(facts, labels)),
         ("risks", "Риски дефицита", _risks(facts, labels)),
         ("excess", "Избыток", _excess(facts, labels)),
         ("seasons", "Сезонные заказы", _seasons(facts, labels)),
@@ -585,7 +584,7 @@ def write_dashboard(
         ("calendar", "Календарь заказов на 6 месяцев", _calendar(facts.as_of, schedules)),
         ("forecast-quality", "Качество прогноза", _backtest_quality(facts)),
         ("stock", "Запас", inventory),
-        ("segments", "Сегменты ассортимента", _segments(facts)),
+        ("segments", "Что делать с ассортиментом", _actions(facts)),
         ("order-flags", "Флаги открытых заказов", _order_flags(facts)),
     )
     nav = "".join(f'<a href="#{key}">{"Поставщики" if key == "orders" else title}</a>' for key, title, _ in workspace)
@@ -782,9 +781,12 @@ ul {{ margin: 0; padding-left: 1.25rem; }}
 <h3>Проверить рекомендации</h3>
 <ol>
 <li>Проверьте дату среза. Если выгрузке больше {STALE_EXPORT_DAYS} дней на дату запуска, <a href="#upload">обновите выгрузку ERP</a> перед заказом.</li>
-<li>В разделе <a href="#orders">«Заказ по поставщикам»</a> раскройте поставщика и сверьте количество, сроки и флаги по SKU. Позиции «Условно к закупке» требуют подтверждения байера.</li>
+<li>В разделе <a href="#orders">«Заказ по поставщикам»</a> раскройте поставщика и сверьте количество, сроки и флаги по SKU.</li>
+<li>Откройте <a href="#decide">«Решить закупщику»</a>. У каждого товара написано, почему система не заказывает его сама и что сделать. Решили заказать — добавьте позицию в заказ поставщику.</li>
 <li>Проверьте <a href="#risks">риски дефицита</a>, <a href="#excess">избыток</a> и <a href="#seasons">сроки сезонных заказов</a>. Скачайте XLSX для работы со списками и проверки прогноза.</li>
 </ol>
+<h3>Как система считает</h3>
+<p>Откуда берутся прогноз, страховой запас, количество и сроки, простыми словами — <a href="{_REPOSITORY_URL}/blob/main/docs/methodology.md">методика расчёта</a>.</p>
 <h3>Прочитать подпись SKU</h3>
 <p>Под кодом SKU указаны категория, обезличенный бренд и ценовая группа внутри категории. «Цена 7/10» означает седьмой дециль. В XLSX эта подпись находится в колонке «Товар».</p>
 </section>
