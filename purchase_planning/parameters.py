@@ -1,4 +1,4 @@
-from purchase_planning import demand, planner, segments, supply
+from purchase_planning import calibration, demand, planner, segments, supply
 
 STALE_EXPORT_DAYS = 35
 
@@ -13,6 +13,13 @@ def run_parameters() -> dict[str, str | int | float]:
         "Минимальная доля сезонного пика": demand.SEASON_PEAK_SHARE,
         "Минимальная доля окна сезона": demand.SEASON_WINDOW_SHARE,
         "Минимум пригодных месяцев для SKU без продаж": demand.MIN_OWN_DEMAND_MONTHS,
+        "Порог SBC ADI": demand.SBC_ADI_THRESHOLD,
+        "Порог SBC CV²": demand.SBC_CV2_THRESHOLD,
+        "Уровень сервиса регулярного спроса, %": calibration.REGULAR_SERVICE,
+        "Уровень сервиса прерывистого спроса, %": calibration.INTERMITTENT_SERVICE,
+        "Уровень сервиса сезонной категории, %": calibration.SEASONAL_SERVICE,
+        "Максимальный множитель целевого запаса": calibration.MAX_STOCK_MULTIPLIER,
+        "Кратности заказа": ", ".join(map(str, supply.ORDER_MULTIPLES)),
         "Начало истории для оценки плеча": supply.LEAD_HISTORY_START.isoformat(),
         "Минимум партий для оценки плеча": supply.MIN_ORDERS,
         "Добавка к обещанному сроку при нехватке данных, дней": supply.DEFAULT_DELAY_DAYS,

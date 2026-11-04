@@ -16,6 +16,38 @@ class OrderFlag(StrEnum):
     TAIL = "Хвост заказа"
 
 
+class DemandType(StrEnum):
+    REGULAR = "Регулярный"
+    INTERMITTENT = "Прерывистый"
+
+
+@dataclass(frozen=True)
+class BacktestMetric:
+    breakdown: str
+    group: str
+    windows: int
+    wape: float | None
+    bias: float | None
+    baseline_wape: float | None
+    baseline_bias: float | None
+
+
+@dataclass(frozen=True)
+class BacktestQuantiles:
+    windows: int
+    p75: float
+    p85: float
+    p95: float
+
+
+@dataclass(frozen=True)
+class BacktestResult:
+    cutoff: date
+    origins: tuple[date, ...]
+    metrics: tuple[BacktestMetric, ...]
+    quantiles: dict[DemandType, BacktestQuantiles]
+
+
 @dataclass(frozen=True)
 class CategoryProfile:
     category: str
@@ -50,6 +82,11 @@ class Recommendation:
     sku_flags: tuple[str, ...] = ()
     stockout_risk: bool = False
     annual_demand_qty: float = 0.0
+    category: str = ""
+    demand_type: DemandType = DemandType.INTERMITTENT
+    target_stock: float | None = None
+    safety_stock: float | None = None
+    order_multiple: int = 1
 
 
 @dataclass(frozen=True)
@@ -58,6 +95,12 @@ class SupplierTiming:
     lead_source: str
     cycle_days: int | None
     flags: tuple[str, ...] = ()
+
+    @property
+    def horizon_days(self) -> int | None:
+        if self.lead_days is None or self.cycle_days is None:
+            return None
+        return self.lead_days + self.cycle_days
 
 
 @dataclass(frozen=True)
@@ -79,6 +122,8 @@ class PlanFacts:
     category_profiles: tuple[CategoryProfile, ...] = ()
     suppliers: tuple[SupplierSummary, ...] = ()
     supply_warning: str | None = None
+    backtest: BacktestResult | None = None
+    backtest_warning: str | None = None
 
     def __post_init__(self) -> None:
         if any(len(row.monthly_forecast) != len(self.forecast_months) for row in self.recommendations):

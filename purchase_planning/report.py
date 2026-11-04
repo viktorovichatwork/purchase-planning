@@ -5,7 +5,9 @@ from pathlib import Path
 
 from openpyxl import Workbook
 from openpyxl.styles import Font
+from openpyxl.worksheet.worksheet import Worksheet
 
+from purchase_planning.calibration import METRIC_HEADERS, stock_multiplier
 from purchase_planning.facts import PlanFacts, Segment
 from purchase_planning.order_sheet import displayed_order_qty, supplier_orders
 from purchase_planning.parameters import STALE_EXPORT_DAYS, run_parameters
@@ -29,6 +31,8 @@ def write_report(
         sheet.append(("Предупреждение", facts.cutoff_warning))
     if facts.supply_warning:
         sheet.append(("Предупреждение", facts.supply_warning))
+    if facts.backtest_warning:
+        sheet.append(("Предупреждение", facts.backtest_warning))
     headers = (
         "Поставщик", "SKU", "К заказу", "Исключено дефицитных месяцев",
         "Прогноз на горизонт, шт.",
@@ -37,12 +41,13 @@ def write_report(
         "В пути по месяцам", "Флаги заказов", "Флаги поставщика", "Пора заказывать у поставщика",
         "Сегмент", "Новинка", "Наценка за 12 мес, %", "Продажи за 12 мес, шт.",
         "Оценка спроса в год, шт.", "Флаги SKU",
+        "Целевой запас", "Страховой запас", "Тип спроса", "К заказу до округления, шт.", "Кратность",
     )
     sheet.append(headers)
     summaries = {supplier.supplier_id: supplier for supplier in facts.suppliers}
     forecast_sheet = workbook.create_sheet("Прогноз")
     forecast_sheet.append(("Поставщик", "SKU", *(f"Прогноз {month:%Y-%m}" for month in facts.forecast_months)))
-    segment_sheets = {}
+    segment_sheets: dict[Segment, Worksheet] = {}
     for segment in Segment:
         if segment != Segment.PURCHASE:
             segment_sheets[segment] = workbook.create_sheet(segment)
@@ -57,17 +62,22 @@ def write_report(
             timing.lead_days if timing else None, timing.lead_source if timing else None,
             timing.cycle_days if timing else None, round(row.stock_at_calculation),
             row.arrival_date.isoformat() if row.arrival_date else None,
-            round(row.stock_at_arrival) if row.stock_at_arrival is not None else None,
+            row.stock_at_arrival,
             transit or None, ", ".join(row.order_flags) or None,
             (", ".join(timing.flags) or None) if timing else None,
             ("Да" if summary.time_to_order else "Нет") if summary else None,
             row.segment, "Да" if row.is_new else None,
             round(row.markup_pct_12m, 1) if row.markup_pct_12m is not None else None,
             round(row.sales_qty_12m), round(row.annual_demand_qty), ", ".join(row.sku_flags) or None,
+            row.target_stock, row.safety_stock,
+            row.demand_type, row.order_qty, row.order_multiple,
         ))
         for cell in target[target.max_row][:2]:
             cell.data_type = "s"
+        for header in ("Остаток на дату прихода", "Целевой запас", "Страховой запас"):
+            target.cell(target.max_row, headers.index(header) + 1).number_format = "0"
         target.cell(target.max_row, headers.index("Наценка за 12 мес, %") + 1).number_format = "0.0"
+        target.cell(target.max_row, headers.index("К заказу до округления, шт.") + 1).number_format = "0.00"
 
     for supplier, group, total in supplier_orders(facts):
         for row in group:
@@ -98,6 +108,7 @@ def write_report(
     for row in review:
         append_sku(segment_sheets[Segment.REVIEW], row)
 
+    _append_backtest(workbook.create_sheet("Бэктест"), facts)
     parameter_sheet = workbook.create_sheet("Параметры")
     parameter_sheet.append(("Параметр", "Значение"))
     parameter_sheet.append(("Дата среза", facts.cutoff.isoformat()))
@@ -108,3 +119,29 @@ def write_report(
     parameter_sheet.column_dimensions["A"].width = 60
     parameter_sheet.column_dimensions["B"].width = 115
     workbook.save(path)
+
+
+def _append_backtest(sheet: Worksheet, facts: PlanFacts) -> None:
+    if facts.backtest_warning:
+        sheet.append((facts.backtest_warning,))
+    result = facts.backtest
+    if result is None:
+        return
+    sheet.append(("Дата среза бэктеста", result.cutoff.isoformat()))
+    sheet.append(("Точки с оценёнными окнами", ", ".join(f"{origin:%Y-%m}" for origin in result.origins)))
+    sheet.append(METRIC_HEADERS)
+    for row in result.metrics:
+        sheet.append((row.breakdown, row.group, row.windows, row.wape, row.bias, row.baseline_wape, row.baseline_bias))
+        for cell in sheet[sheet.max_row][3:]:
+            cell.number_format = "0.00%"
+    sheet.append(())
+    sheet.append(("Тип спроса", "Окон с отношением", "p75", "p85", "p95", "Множитель", "Множитель для сезонной категории"))
+    for group, values in result.quantiles.items():
+        sheet.append((
+            group, values.windows, values.p75, values.p85, values.p95,
+            stock_multiplier(result, group, False), stock_multiplier(result, group, True),
+        ))
+        for cell in sheet[sheet.max_row][2:]:
+            cell.number_format = "0.00"
+    for column, width in zip("ABCDEFG", (22, 27, 10, 14, 14, 29, 37)):
+        sheet.column_dimensions[column].width = width

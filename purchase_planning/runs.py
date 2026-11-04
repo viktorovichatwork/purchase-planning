@@ -6,10 +6,12 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
+from purchase_planning.calibration import stock_multiplier
 from purchase_planning.comparison import compare, comparison_evidence, summarize
 from purchase_planning.dashboard import write_dashboard
 from purchase_planning.export import ExportValidationError
 from purchase_planning.facts import Segment
+from purchase_planning.order_sheet import displayed_order_qty
 from purchase_planning.parameters import run_parameters
 from purchase_planning.planner import calculate
 from purchase_planning.report import write_report
@@ -40,8 +42,14 @@ def run_plan(data_dir: str | Path, history_dir: str | Path) -> Path:
     parameters = run_parameters()
     calculation = calculate(data_dir, previous_segments=previous_segments)
     facts = calculation.facts
+    if facts.backtest is not None:
+        for group in facts.backtest.quantiles:
+            parameters[f"Множитель, {group.lower()} спрос"] = stock_multiplier(facts.backtest, group, False)
+            parameters[f"Сезонный множитель, {group.lower()} спрос"] = stock_multiplier(facts.backtest, group, True)
     evidence = comparison_evidence(calculation.sales, calculation.receipts, calculation.orders)
     facts_data = asdict(facts)
+    for saved, recommendation in zip(facts_data["recommendations"], facts.recommendations, strict=True):
+        saved["rounded_order_qty"] = displayed_order_qty(recommendation)
     changes = compare(
         old_rows, list(facts_data["recommendations"]), _read_json(previous / "evidence.json"), evidence,
         parameters_changed=_read_json(previous / "parameters.json") != parameters,

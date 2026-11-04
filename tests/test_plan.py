@@ -1,8 +1,9 @@
 import csv
 import json
 import shutil
+import subprocess
+import sys
 from datetime import date, timedelta
-from math import ceil
 from pathlib import Path
 
 import pytest
@@ -162,10 +163,11 @@ def test_open_orders_respect_arrival_and_overdue_boundaries(export):
     assert set(row.order_flags) == {
         "Хвост заказа", "Зависший заказ", "Дата прихода просроченного заказа оценена",
     }
-    assert row.order_qty == pytest.approx(20 * 18 / 31 - 5 + 20)
+    assert row.order_qty == 0
     assert row.arrival_date == date(2027, 3, 15)
     assert row.stock_at_arrival == pytest.approx(1000 - 20 * (5 + 15 / 31))
-    assert facts.suppliers[0].time_to_order
+    assert not facts.suppliers[0].time_to_order
+    assert row.stockout_risk
 
 
 def test_missing_cycle_flags_supplier_and_suppresses_order(export):
@@ -212,7 +214,10 @@ def test_export_to_order_sheet(export):
         header, values, total = list(workbook["Заказ по поставщикам"].values)[-3:]
         assert header[3:6] == ("Исключено дефицитных месяцев", "Прогноз на горизонт, шт.", "Мало данных")
         assert values[:2] == (row.supplier_id, row.sku_id)
-        assert values[2:5] == (ceil(row.order_qty), 0, round(sum(row.monthly_forecast)))
+        assert values[2:5] == (160, 0, round(sum(row.monthly_forecast)))
+        assert values[header.index("Целевой запас")] == pytest.approx(152.2795699)
+        assert values[header.index("Страховой запас")] == 0
+        assert values[header.index("Тип спроса")] == "Регулярный"
         assert values[6:9] == (201, "Вся история заказов + 20 дней", 30)
         sales_column = header.index("Продажи за 12 мес, шт.")
         assert header[sales_column + 1] == "Оценка спроса в год, шт."
@@ -221,10 +226,50 @@ def test_export_to_order_sheet(export):
         assert forecast_header[2:] == tuple(f"Прогноз {month:%Y-%m}" for month in facts.forecast_months)
         assert forecast_row[2:] == tuple(round(qty) for qty in row.monthly_forecast)
         assert total[:2] == ("SUP-1", "Итого")
-        assert total[2] == ceil(row.order_qty)
+        assert total[2] == 160
         assert total[header.index("Пора заказывать у поставщика")] == "Да"
     finally:
         workbook.close()
+
+
+def test_saved_backtest_excludes_stockouts_and_calibrates_the_order(export):
+    (export / "export_meta.json").write_text('{"cutoff_date":"2026-10-01"}', encoding="utf-8")
+    sales = export / "sales_monthly.csv"
+    sales.write_text(sales.read_text(encoding="utf-8").replace("880,0,1,30,1", "40,0,1,30,0"), encoding="utf-8")
+    orders = export / "purchase_orders.csv"
+    header = orders.read_text(encoding="utf-8").splitlines()[0]
+    orders.write_text(
+        header + "\n"
+        "PO-1,SKU-1,SUP-1,import,2026-01-01,,-20,completed,100,100,100,0\n"
+        "PO-2,SKU-1,SUP-1,import,2026-01-31,,-20,completed,50,50,50,0\n",
+        encoding="utf-8",
+    )
+    june = plan(export, date(2026, 6, 30))
+    assert june.recommendations[0].demand_type == "Прерывистый"
+    assert june.recommendations[0].monthly_forecast == pytest.approx((10 * 30 / 31,))
+    assert plan(export).recommendations[0].target_stock == pytest.approx(25.8064516)
+
+    subprocess.run([sys.executable, "-m", "purchase_planning.backtest", str(export)], check=True)
+    assert plan(export, date(2026, 6, 30)).recommendations == june.recommendations
+    run = run_plan(export, export / "history")
+    workbook = load_workbook(run / "report.xlsx")
+    try:
+        metrics = list(workbook["Бэктест"].values)
+        assert metrics[1][:2] == ("Точки с оценёнными окнами", "2026-06, 2026-07")
+        total = next(row for row in metrics if row[:2] == ("Все", "Все"))
+        assert total[2:5] == pytest.approx((2, 4 / 7, -4 / 7))
+        quantiles = {row[0]: row[1:] for row in metrics if row[0] in {"Регулярный", "Прерывистый"}}
+        assert quantiles["Прерывистый"] == pytest.approx((1, 3, 3, 3, 2, 2))
+        assert quantiles["Регулярный"] == pytest.approx((1, 2, 2, 2, 2, 2))
+        headers, row, total = list(workbook["Заказ по поставщикам"].values)[-3:]
+        assert row[headers.index("Целевой запас")] == pytest.approx(51.6129032)
+        assert row[headers.index("Страховой запас")] == pytest.approx(25.8064516)
+        assert row[headers.index("Кратность")] == 50
+        assert row[headers.index("К заказу до округления, шт.")] == pytest.approx(51.6129032)
+        assert row[2] == total[2] == 100
+    finally:
+        workbook.close()
+    assert "57.14%" in (run / "index.html").read_text(encoding="utf-8")
 
 
 def test_missing_metadata_uses_last_complete_month_and_warns_in_report(export):

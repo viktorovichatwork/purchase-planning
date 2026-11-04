@@ -7,10 +7,12 @@ from datetime import date, timedelta
 from math import fsum
 from pathlib import Path
 
+from purchase_planning.calibration import read_backtest, stock_multiplier
 from purchase_planning.demand import apply_analog_levels, category_profiles, estimate_sku_demand
 from purchase_planning.export import ExportValidationError, finite_quantity, read_export
 from purchase_planning.facts import PlanFacts, Recommendation, Segment, SupplierSummary
 from purchase_planning.inventory import forecast_period, project_stock
+from purchase_planning.order_sheet import displayed_order_qty
 from purchase_planning.segments import ASSORTMENT_MONTHS, Sale, classify_sku, month_index
 from purchase_planning.supply import PurchaseLine, Receipt, classify_transit, read_supply
 
@@ -66,19 +68,18 @@ def _read_cutoff(path: Path, complete_months: list[date]) -> tuple[date, str | N
     return cutoff, None
 
 
-def plan(
-    data_dir: str | Path, as_of: date | None = None, *,
-    previous_segments: Mapping[str, Segment] | None = None,
-) -> PlanFacts:
-    return calculate(data_dir, as_of, previous_segments=previous_segments).facts
+def _sku_known_at(row: dict[str, str], as_of: date) -> bool:
+    try:
+        created = date.fromisoformat(f"{row['created']}-01")
+    except ValueError:
+        # Older exports can lack a creation month.
+        return True
+    return created <= as_of
 
 
-def calculate(
-    data_dir: str | Path, as_of: date | None = None, *,
-    previous_segments: Mapping[str, Segment] | None = None,
-) -> Calculation:
-    directory = Path(data_dir)
-    tables = read_export(directory)
+def read_monthly_history(
+    tables: dict[str, list[dict[str, str]]],
+) -> tuple[list[tuple[str, Sale]], dict[tuple[str, date], float], set[date]]:
     reasons: list[str] = []
     sales_rows: list[tuple[str, Sale]] = []
     partial_months: set[date] = set()
@@ -114,6 +115,23 @@ def calculate(
             )
     if reasons:
         raise ExportValidationError(reasons)
+    return sales_rows, stock, partial_months
+
+
+def plan(
+    data_dir: str | Path, as_of: date | None = None, *,
+    previous_segments: Mapping[str, Segment] | None = None,
+) -> PlanFacts:
+    return calculate(data_dir, as_of, previous_segments=previous_segments).facts
+
+
+def calculate(
+    data_dir: str | Path, as_of: date | None = None, *,
+    previous_segments: Mapping[str, Segment] | None = None,
+) -> Calculation:
+    directory = Path(data_dir)
+    tables = read_export(directory)
+    sales_rows, stock, partial_months = read_monthly_history(tables)
 
     cutoff, warning = _read_cutoff(
         directory / "export_meta.json",
@@ -122,7 +140,13 @@ def calculate(
     calculation_date = cutoff if as_of is None else as_of
     if calculation_date > cutoff:
         raise ExportValidationError(["Дата расчёта позже даты среза."])
+    backtest, backtest_warning = read_backtest(directory, calculation_date)
 
+    sku_rows = tables["sku_dim"]
+    if calculation_date < cutoff:
+        known_skus = {sku for sku, sale in sales_rows if sale.month <= calculation_date}
+        sku_rows = [row for row in sku_rows if row["sku_id"] in known_skus or _sku_known_at(row, calculation_date)]
+    sku_categories = {row["sku_id"]: row["category"] for row in sku_rows}
     stock_month = _month_end(calculation_date.strftime("%Y-%m"))
     month_start = calculation_date.replace(day=1)
     forecast_start = calculation_date + timedelta(days=1)
@@ -134,6 +158,8 @@ def calculate(
     first_sales: dict[str, date] = {}
     sales_by_sku: dict[str, list[Sale]] = defaultdict(list)
     for sku, sale in sales_rows:
+        if sku not in sku_categories:
+            continue
         month, quantity = sale.month, sale.quantity
         if month <= calculation_date and month not in partial_months:
             sales[sku, month] += quantity
@@ -145,8 +171,6 @@ def calculate(
             if quantity > 0:
                 first_sales[sku] = min(first_sales.get(sku, month), month)
 
-    sku_rows = tables["sku_dim"]
-    sku_categories = {row["sku_id"]: row["category"] for row in sku_rows}
     profiles = category_profiles(sku_categories, sales)
     history_months = _complete_stock_months(calculation_date, partial_months)
     own_demand = {
@@ -155,7 +179,7 @@ def calculate(
     }
     demand_by_sku = apply_analog_levels(sku_rows, own_demand, set(first_sales))
 
-    timing, receipts, orders = read_supply(tables, calculation_date, cutoff)
+    timing, receipts, orders, order_multiples = read_supply(tables, calculation_date, cutoff)
     transit, order_flags = classify_transit([line for line in orders if line.status == "open"], calculation_date)
     month_receipts: dict[str, dict[date, float]] = defaultdict(lambda: defaultdict(float))
     current_month = month_index(calculation_date)
@@ -211,12 +235,15 @@ def calculate(
         forecast = {}
         arrival: date | None = None
         arrival_stock: float | None = None
+        target_stock: float | None = None
+        safety_stock: float | None = None
         order_qty = 0.0
         stockout_risk = False
         purchase_segment = assortment.segment in {Segment.PURCHASE, Segment.CONDITIONAL}
+        horizon_days = supplier_timing.horizon_days
         if lead is not None:
             arrival = calculation_date + timedelta(days=lead)
-            horizon_end = forecast_start + timedelta(days=lead + (cycle or 0))
+            horizon_end = forecast_start + timedelta(days=horizon_days if horizon_days is not None else lead)
             forecast = dict(forecast_period(profile, annual_level, forecast_start, horizon_end))
             # Both the cutoff and the expected arrival are measured at the end of the day.
             projection = project_stock(
@@ -229,8 +256,13 @@ def calculate(
                 and sku in first_sales and assortment.sales_qty_12m > 0
                 and lead > 0 and projection.stockout_by_snapshot
             )
-            if cycle is not None and not unknown_supplier and purchase_segment:
-                order_qty = projection.unmet_demand
+            if horizon_days is not None:
+                forecast_total = fsum(forecast.values())
+                multiplier = stock_multiplier(backtest, demand.demand_type, profile.is_seasonal)
+                target_stock = forecast_total * multiplier
+                safety_stock = target_stock - forecast_total
+                if not unknown_supplier and purchase_segment:
+                    order_qty = max(0.0, target_stock - arrival_stock)
         recommendation = Recommendation(
             sku_id=sku, supplier_id=supplier, order_qty=order_qty,
             excluded_stockout_months=demand.excluded_stockout_months, low_data=demand.low_data,
@@ -240,10 +272,12 @@ def calculate(
             segment=assortment.segment, is_new=assortment.is_new,
             markup_pct_12m=assortment.markup_pct_12m, sales_qty_12m=assortment.sales_qty_12m,
             sku_flags=tuple(flags), stockout_risk=stockout_risk, annual_demand_qty=annual_level,
+            category=profile.category, demand_type=demand.demand_type, target_stock=target_stock,
+            safety_stock=safety_stock, order_multiple=order_multiples.get(sku, 1),
         )
         sku_plans.append((recommendation, forecast))
         if assortment.segment == Segment.PURCHASE:
-            quantities_by_supplier[supplier].append(order_qty)
+            quantities_by_supplier[supplier].append(displayed_order_qty(recommendation))
             if order_qty > 0 and sku in first_sales:
                 suppliers_due.add(supplier)
 
@@ -262,6 +296,6 @@ def calculate(
         cutoff, calculation_date, tuple(
             replace(row, monthly_forecast=tuple(forecast.get(month, 0.0) for month in forecast_months))
             for row, forecast in sku_plans
-        ), warning, forecast_months, tuple(profiles.values()), suppliers, supply_warning,
+        ), warning, forecast_months, tuple(profiles.values()), suppliers, supply_warning, backtest, backtest_warning,
     )
     return Calculation(facts, sales_by_sku, receipts, orders)

@@ -14,16 +14,21 @@ class StockProjection:
     stockout_by_snapshot: bool
 
 
-def forecast_period(
-    profile: CategoryProfile, annual_level: float, start: date, end: date,
-) -> Iterator[tuple[date, float]]:
-    """Yield demand by month over [start, end), prorating incomplete months."""
+def month_shares(start: date, end: date) -> Iterator[tuple[date, float]]:
+    """Yield the covered share of each calendar month over [start, end)."""
     while start < end:
         month = start.replace(day=1)
         month_days = monthrange(month.year, month.month)[1]
         days = min(month_days - start.day + 1, (end - start).days)
-        yield month, annual_level * profile.weight_for(month.month) * days / month_days
+        yield month, days / month_days
         start += timedelta(days=days)
+
+
+def forecast_period(
+    profile: CategoryProfile, annual_level: float, start: date, end: date,
+) -> Iterator[tuple[date, float]]:
+    for month, share in month_shares(start, end):
+        yield month, annual_level * profile.weight_for(month.month) * share
 
 
 def project_stock(

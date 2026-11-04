@@ -1,6 +1,7 @@
 from collections import Counter, defaultdict
 from enum import StrEnum
-from typing import TypedDict
+from math import ceil
+from typing import NotRequired, TypedDict
 
 from purchase_planning.segments import Sale
 from purchase_planning.supply import PurchaseLine, Receipt
@@ -31,6 +32,7 @@ class Evidence(TypedDict):
 class ComparedRow(TypedDict):
     sku_id: str
     order_qty: float
+    rounded_order_qty: NotRequired[int]
     segment: str
     stockout_risk: bool
 
@@ -83,7 +85,10 @@ def compare(
     changes = []
     for sku in sorted(before.keys() | after.keys()):
         old, new = before.get(sku), after.get(sku)
-        order_qty = (old["order_qty"] if old else 0.0, new["order_qty"] if new else 0.0)
+        order_qty = (
+            old.get("rounded_order_qty", ceil(old["order_qty"])) if old else 0.0,
+            new.get("rounded_order_qty", ceil(new["order_qty"])) if new else 0.0,
+        )
         segment = (old["segment"] if old else None, new["segment"] if new else None)
         risk = (old["stockout_risk"] if old else False, new["stockout_risk"] if new else False)
         if order_qty[0] == order_qty[1] and segment[0] == segment[1] and risk[0] == risk[1]:
