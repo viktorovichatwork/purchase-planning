@@ -1,5 +1,6 @@
 from collections import Counter
 from collections.abc import Iterable
+from dataclasses import dataclass
 from datetime import date, timedelta
 from html import escape
 from math import fsum
@@ -7,12 +8,57 @@ from pathlib import Path
 
 from purchase_planning.comparison import Change, summarize
 from purchase_planning.explanations import Explanations
-from purchase_planning.facts import OrderFlag, PlanFacts, Recommendation, Segment, SupplierSummary
+from purchase_planning.facts import OrderFlag, PlanFacts, Recommendation, Segment
 from purchase_planning.order_sheet import (
-    SupplierOrder, displayed_order_qty, excess_rows, order_date_label, stockout_rows, supplier_orders,
+    coverage_text, displayed_order_qty, excess_rows, order_date_label, rounded_quantity, stock_below_reorder_point,
+    stockout_rows, supplier_orders,
 )
 from purchase_planning.parameters import STALE_EXPORT_DAYS
 from purchase_planning.replenishment import inventory_summary
+from purchase_planning.wording import days_text
+
+
+@dataclass(frozen=True)
+class Batch:
+    deadline: date
+    quantity: int
+    seasonal: bool
+    low_stock: bool
+
+
+@dataclass(frozen=True)
+class SupplierSchedule:
+    supplier_id: str
+    lines: list[Recommendation]
+    batches: list[Batch]
+    flags: tuple[str, ...]
+
+    @property
+    def deadline(self) -> date:
+        return min(batch.deadline for batch in self.batches)
+
+
+def _supplier_schedules(facts: PlanFacts) -> list[SupplierSchedule]:
+    summaries = {supplier.supplier_id: supplier for supplier in facts.suppliers}
+    schedules = []
+    for supplier, lines, _ in supplier_orders(facts):
+        summary = summaries.get(supplier)
+        batches = []
+        for row in lines:
+            low_stock = stock_below_reorder_point(row)
+            season = row.seasonal_order
+            seasonal_qty = 0
+            if season and season.actionable:
+                seasonal_qty = rounded_quantity(season.order_qty, row.order_multiple)
+                batches.append(Batch(season.deadline, seasonal_qty, True, low_stock))
+            ordinary_qty = displayed_order_qty(row) - seasonal_qty
+            if ordinary_qty > 0:
+                placement = row.order_by if row.grouped_season_deadline else row.regular_order_date
+                if row.regular_order_qty is None:
+                    placement = placement or row.order_by or (summary.next_order_date if summary else None)
+                batches.append(Batch(placement or facts.as_of, ordinary_qty, False, low_stock))
+        schedules.append(SupplierSchedule(supplier, lines, batches, summary.timing.flags if summary else ()))
+    return sorted(schedules, key=lambda row: (row.deadline, row.supplier_id))
 
 
 def _date(day: date | None) -> str:
@@ -42,9 +88,13 @@ def _sku(row: Recommendation, facts: PlanFacts, explanation: str, supplier_flags
         ("К заказу, шт.", displayed_order_qty(row)),
         ("Остаток, шт.", round(row.stock_at_calculation)),
         ("В пути, шт.", round(row.in_transit)),
-        ("Хватит до", _date(row.stock_until) if row.stock_until else "Дольше горизонта"),
-        ("Заказать не позже", order_date_label(row.order_by, facts.as_of, date_format="%d.%m.%Y") if row.order_by else "—"),
-        ("Покрытие, мес", _decimal(row.coverage_months) if row.coverage_months is not None else "Нет прогноза"),
+        ("Хватит до", _date(row.stock_until) if row.stock_until else (
+            "Дольше горизонта" if row.coverage_months is not None else "Нет прогноза"
+        )),
+        ("Заказать не позже", order_date_label(
+            row.order_by, facts.as_of, date_format="%d.%m.%Y", below_reorder_point=stock_below_reorder_point(row),
+        ) if row.order_by else "—"),
+        ("Покрытие, мес", coverage_text(row)),
         ("Сегмент", row.segment),
         ("Флаги", ", ".join(dict.fromkeys((*row.order_flags, *row.sku_flags, *supplier_flags))) or "—"),
     )
@@ -53,45 +103,56 @@ def _sku(row: Recommendation, facts: PlanFacts, explanation: str, supplier_flags
     return f"<li><strong>{escape(row.sku_id)}</strong><dl>{fields_html}</dl>{why}</li>"
 
 
-def _order_table(facts: PlanFacts, orders: list[SupplierOrder], explanations: dict[str, str]) -> str:
-    summaries = {supplier.supplier_id: supplier for supplier in facts.suppliers}
+def _order_table(facts: PlanFacts, schedules: list[SupplierSchedule], explanations: dict[str, str]) -> str:
     rows = []
-    for supplier, lines, total in orders:
-        summary = summaries.get(supplier)
-        if summary and summary.next_order_date:
-            when = order_date_label(summary.next_order_date, facts.as_of, date_format="%d.%m.%Y")
-        elif summary and summary.time_to_order:
-            when = "Сейчас"
-        else:
-            when = "Дольше горизонта"
-        name = escape(supplier or "Поставщик не указан")
-        due = " · пора заказывать" if summary and summary.time_to_order else ""
-        flags = summary.timing.flags if summary else ()
-        skus = "".join(_sku(row, facts, explanations.get(row.sku_id, ""), flags) for row in lines)
+    for schedule in schedules:
+        as_of = facts.as_of
+        low_stock = any(batch.deadline <= as_of and batch.low_stock for batch in schedule.batches)
+        when = order_date_label(schedule.deadline, as_of, date_format="%d.%m.%Y", below_reorder_point=low_stock)
+        name = escape(schedule.supplier_id or "Поставщик не указан")
+        batch_lines = []
+        for seasonal, label in ((False, "Обычная партия"), (True, "Сезонная партия")):
+            batches = [batch for batch in schedule.batches if batch.seasonal == seasonal]
+            if batches:
+                deadline = min(batch.deadline for batch in batches)
+                batch_date = f"до {_date(deadline)}" if seasonal else order_date_label(deadline, as_of, date_format="%d.%m.%Y")
+                quantity = sum(batch.quantity for batch in batches)
+                batch_lines.append(f'<span class="batch">{label} — {batch_date} — {quantity} шт.</span>')
+        skus = "".join(_sku(row, facts, explanations.get(row.sku_id, ""), schedule.flags) for row in schedule.lines)
         rows.append(
-            f'<details><summary><strong>{name}</strong><span>{when}{due}</span>'
-            f'<strong>{total} шт.</strong></summary><ul class="skus">{skus}</ul></details>'
+            f'<details><summary><strong>{name}</strong> <span>Когда заказать — {when}</span>'
+            f'{"".join(batch_lines)}</summary><ul class="skus">{skus}</ul></details>'
         )
     if not rows:
         return "<p>Нет позиций с положительным количеством к заказу.</p>"
-    return '<p class="meta">Когда заказать и сколько штук. Откройте поставщика, чтобы увидеть SKU.</p>' + "\n".join(rows)
+    return (
+        '<p class="meta">Для каждого вида партии показаны ближайший срок и общий объём. '
+        'Откройте поставщика, чтобы увидеть SKU.</p>' + "\n".join(rows)
+    )
 
 
 def _decision(
-    facts: PlanFacts, suppliers: list[SupplierSummary], previous_run: str | None, changes: list[Change],
+    facts: PlanFacts, schedules: list[SupplierSchedule], previous_run: str | None, changes: list[Change],
     explanation: str,
 ) -> str:
-    due = sum(row.time_to_order for row in suppliers)
+    as_of = facts.as_of
+    due = sum(schedule.deadline <= as_of for schedule in schedules)
     soon = sum(
-        not row.time_to_order and row.next_order_date is not None
-        and facts.as_of < row.next_order_date <= facts.as_of + timedelta(days=30)
-        for row in suppliers
+        any(as_of < batch.deadline <= as_of + timedelta(days=30) for batch in schedule.batches)
+        for schedule in schedules
+    )
+    batches = [batch for schedule in schedules for batch in schedule.batches]
+    units_now = sum(batch.quantity for batch in batches if batch.deadline <= as_of)
+    seasonal_units = sum(
+        batch.quantity for batch in batches if batch.seasonal and as_of <= batch.deadline <= as_of + timedelta(days=90)
     )
     excess = excess_rows(facts)
     volume = round(fsum(max(0, row.stock_at_calculation + row.in_transit - (row.excess_threshold or 0)) for row in excess))
     metrics = (
         ("Поставщиков пора заказывать", due),
         ("Поставщиков в следующие 30 дней", soon),
+        ("К заказу сейчас, шт.", units_now),
+        ("Сезонные партии с крайним сроком в ближайшие 90 дней, шт.", seasonal_units),
         ("SKU в риске дефицита", len(stockout_rows(facts))),
         ("Избыток, шт. сверх порога", volume),
     )
@@ -105,6 +166,7 @@ def _risks(facts: PlanFacts) -> str:
     risks = stockout_rows(facts)
     visible = [row for row in risks if row.lost_sales >= 1]
     hidden = len(risks) - len(visible)
+    hidden_label = "незначительный риск" if hidden % 10 == 1 and hidden % 100 != 11 else "незначительных"
     return _table(
         "Риски дефицита",
         ("SKU", "Поставщик", "Остаток, шт.", "В пути, шт.", "Хватит до", "Приход при заказе сегодня",
@@ -112,7 +174,7 @@ def _risks(facts: PlanFacts) -> str:
         ((row.sku_id, row.supplier_id, round(row.stock_at_calculation), round(row.in_transit),
           _date(row.stock_until), _date(row.arrival_date), row.stockout_days, round(row.lost_sales))
          for row in visible),
-    ) + (f'<p class="meta">ещё {hidden} незначительных</p>' if hidden else "")
+    ) + (f'<p class="meta">ещё {hidden} {hidden_label}</p>' if hidden else "")
 
 
 def _excess(facts: PlanFacts) -> str:
@@ -120,7 +182,7 @@ def _excess(facts: PlanFacts) -> str:
         "Избыток",
         ("SKU", "Поставщик", "Остаток, шт.", "В пути, шт.", "Покрытие, мес", "Дециль цены", "Порог, шт.", "Флаг"),
         ((row.sku_id, row.supplier_id, round(row.stock_at_calculation), round(row.in_transit),
-          _decimal(row.coverage_months), row.price_decile if row.price_decile is not None else "—",
+          coverage_text(row), row.price_decile if row.price_decile is not None else "—",
           round(row.excess_threshold) if row.excess_threshold is not None else "—",
           OrderFlag.RESCHEDULE if OrderFlag.RESCHEDULE in row.order_flags else "—")
          for row in excess_rows(facts)),
@@ -139,14 +201,13 @@ def _seasons(facts: PlanFacts) -> str:
     )
 
 
-def _calendar(as_of: date, suppliers: list[SupplierSummary]) -> str:
+def _calendar(as_of: date, schedules: list[SupplierSchedule]) -> str:
     labels = ("янв.", "февр.", "март", "апр.", "май", "июнь", "июль", "авг.", "сент.", "окт.", "нояб.", "дек.")
     first = as_of.year * 12 + as_of.month - 1
     counts: Counter[int] = Counter()
-    for row in suppliers:
-        if row.next_order_date:
-            day = max(as_of, row.next_order_date)
-            counts[day.year * 12 + day.month - 1] += 1
+    for schedule in schedules:
+        days = (max(as_of, batch.deadline) for batch in schedule.batches)
+        counts.update({day.year * 12 + day.month - 1 for day in days})
     months = [divmod(month, 12) for month in range(first, first + 6)]
     values = [counts[year * 12 + month] for year, month in months]
     scale = 72 / max(1, *values)
@@ -209,16 +270,14 @@ def write_dashboard(
         for warning in (facts.cutoff_warning, facts.supply_warning) if warning
     )
     inventory = "".join(f"<li>{name} — {count} SKU</li>" for name, count in inventory_summary(facts).items())
-    orders = supplier_orders(facts)
-    ordering_suppliers = {supplier for supplier, _, _ in orders}
-    suppliers = [row for row in facts.suppliers if row.supplier_id in ordering_suppliers]
+    schedules = _supplier_schedules(facts)
     sections = (
-        ("Сводка решения", _decision(facts, suppliers, previous_run, changes, explanations.summary if explanations else "")),
-        ("Заказ по поставщикам", _order_table(facts, orders, explanations.rows if explanations else {})),
+        ("Сводка решения", _decision(facts, schedules, previous_run, changes, explanations.summary if explanations else "")),
+        ("Заказ по поставщикам", _order_table(facts, schedules, explanations.rows if explanations else {})),
         ("Риски дефицита", _risks(facts)),
         ("Избыток", _excess(facts)),
         ("Сезонные заказы", _seasons(facts)),
-        ("Календарь заказов на 6 месяцев", _calendar(facts.as_of, suppliers)),
+        ("Календарь заказов на 6 месяцев", _calendar(facts.as_of, schedules)),
         ("Качество прогноза", _backtest_quality(facts)),
         ("Запас", f"<ul>{inventory}</ul>"),
         ("Сегменты ассортимента", _segments(facts)),
@@ -274,7 +333,7 @@ a {{ color: var(--accent); display: inline-flex; align-items: center; min-height
 dd {{ margin: 0; }}
 details {{ border-bottom: 1px solid var(--line); }}
 summary {{ padding: .7rem .25rem; cursor: pointer; overflow-wrap: anywhere; }}
-summary span, summary strong:last-child {{ margin-left: .6rem; }}
+.batch {{ display: block; margin-left: 1rem; }}
 .skus {{ padding: 0; list-style: none; }}
 .skus li {{ border-top: 1px solid var(--line); padding: .6rem 0 .6rem 1rem; overflow-wrap: anywhere; }}
 .skus dl {{ display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 2fr); gap: .1rem .5rem; margin: .3rem 0; }}
@@ -291,7 +350,7 @@ ul {{ margin: 0; padding-left: 1.25rem; }}
 <main>
 <header>
 <h1>План закупок</h1>
-<p class="meta">Срез <time datetime="{facts.cutoff.isoformat()}">{facts.cutoff:%d.%m.%Y}</time> · {age} дн. на дату запуска</p>
+<p class="meta">Срез <time datetime="{facts.cutoff.isoformat()}">{facts.cutoff:%d.%m.%Y}</time> · {days_text(age)} на дату запуска</p>
 <p><strong class="{status_class}">{status}</strong></p>
 <a href="report.xlsx" download="report.xlsx">Скачать отчёт XLSX</a>
 {history_link}

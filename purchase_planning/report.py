@@ -10,7 +10,8 @@ from openpyxl.worksheet.worksheet import Worksheet
 from purchase_planning.calibration import METRIC_HEADERS, stock_multiplier
 from purchase_planning.facts import OrderFlag, PlanFacts, Recommendation, Segment
 from purchase_planning.order_sheet import (
-    displayed_order_qty, excess_rows, order_date_label, rounded_quantity, stockout_rows, supplier_orders,
+    coverage_text, displayed_order_qty, excess_rows, order_date_label, rounded_quantity, stock_below_reorder_point,
+    stockout_rows, supplier_orders,
 )
 from purchase_planning.parameters import PARAMETER_NUMBER_FORMATS, STALE_EXPORT_DAYS, run_parameters
 from purchase_planning.replenishment import inventory_summary
@@ -19,7 +20,19 @@ from purchase_planning.replenishment import inventory_summary
 def _stock_until_label(row: Recommendation) -> str | None:
     if row.stock_until:
         return row.stock_until.isoformat()
-    return "Дольше горизонта" if row.segment in {Segment.PURCHASE, Segment.CONDITIONAL} else None
+    if row.coverage_months is not None:
+        return "Дольше горизонта"
+    return "Нет прогноза" if row.segment in {Segment.PURCHASE, Segment.CONDITIONAL} else None
+
+
+def _coverage_cell(row: Recommendation) -> float | str:
+    if row.stock_until is not None and row.coverage_months is not None:
+        return round(row.coverage_months, 1)
+    return coverage_text(row)
+
+
+def _sku_order_date(row: Recommendation, deadline: date | None, as_of: date) -> str | None:
+    return order_date_label(deadline, as_of, below_reorder_point=stock_below_reorder_point(row)) if deadline else None
 
 
 def write_report(
@@ -67,6 +80,19 @@ def write_report(
         if segment != Segment.PURCHASE:
             segment_sheets[segment] = workbook.create_sheet(segment)
             segment_sheets[segment].append(headers)
+    orders = supplier_orders(facts)
+    supplier_dates = {}
+    for supplier, group, _ in orders:
+        summary = summaries.get(supplier)
+        if summary and summary.next_order_date:
+            supplier_dates[supplier] = order_date_label(
+                summary.next_order_date, facts.as_of,
+                below_reorder_point=any(
+                    row.order_by is not None and row.order_by <= facts.as_of and stock_below_reorder_point(row)
+                    for row in group
+                ),
+            )
+
     def append_sku(target: Worksheet, row: Recommendation) -> None:
         summary = summaries.get(row.supplier_id)
         timing = summary.timing if summary else None
@@ -90,16 +116,16 @@ def write_report(
             round(row.sales_qty_12m), round(row.annual_demand_qty), ", ".join(row.sku_flags) or None,
             row.target_stock, row.safety_stock,
             row.demand_type, row.order_qty, row.order_multiple,
-            round(row.coverage_months, 1) if row.coverage_months is not None else "Нет прогноза",
+            _coverage_cell(row),
             _stock_until_label(row),
-            order_date_label(row.order_by, facts.as_of) if row.order_by else None,
-            order_date_label(summary.next_order_date, facts.as_of) if summary and summary.next_order_date else None,
+            _sku_order_date(row, row.order_by, facts.as_of),
+            supplier_dates.get(row.supplier_id),
             rounded_quantity(row.regular_order_qty, row.order_multiple) if row.regular_order_qty else None,
             rounded_quantity(season.order_qty, row.order_multiple) if season and season.actionable else None,
             row.grouped_season_deadline.isoformat() if row.grouped_season_deadline else (
                 season.deadline.isoformat() if season else None
             ),
-            order_date_label(regular_placement, facts.as_of) if row.regular_order_qty and regular_placement else None,
+            _sku_order_date(row, regular_placement or facts.as_of, facts.as_of) if row.regular_order_qty else None,
         ))
         for cell in target[target.max_row][:2]:
             cell.data_type = "s"
@@ -109,7 +135,7 @@ def write_report(
         target.cell(target.max_row, headers.index("К заказу до округления, шт.") + 1).number_format = "0"
         target.cell(target.max_row, headers.index("Покрытие, мес") + 1).number_format = "0.0"
 
-    for supplier, group, total in supplier_orders(facts):
+    for supplier, group, total in orders:
         for row in group:
             append_sku(sheet, row)
         summary = summaries.get(supplier)
@@ -119,7 +145,7 @@ def write_report(
             (", ".join(summary.timing.flags) or None) if summary else None,
             ("Да" if summary.time_to_order else "Нет") if summary else None,
             *([None] * (headers.index("Дата заказа у поставщика") - headers.index("Пора заказывать у поставщика") - 1)),
-            order_date_label(summary.next_order_date, facts.as_of) if summary and summary.next_order_date else None,
+            supplier_dates.get(supplier),
         ))
         sheet.cell(sheet.max_row, 1).data_type = "s"
         for cell in sheet[sheet.max_row]:
@@ -128,8 +154,8 @@ def write_report(
     for row in sorted(facts.recommendations, key=lambda row: (row.supplier_id, row.sku_id)):
         forecast_sheet.append((
             row.supplier_id or "Поставщик не указан", row.sku_id, *(round(qty) for qty in row.monthly_forecast),
-            round(row.coverage_months, 1) if row.coverage_months is not None else "Нет прогноза",
-            _stock_until_label(row), order_date_label(row.order_by, facts.as_of) if row.order_by else None,
+            _coverage_cell(row),
+            _stock_until_label(row), _sku_order_date(row, row.order_by, facts.as_of),
         ))
         forecast_sheet.cell(forecast_sheet.max_row, 3 + len(facts.forecast_months)).number_format = "0.0"
         for cell in forecast_sheet[forecast_sheet.max_row][:2]:
@@ -163,7 +189,7 @@ def _append_inventory_sheets(workbook: Workbook, facts: PlanFacts) -> None:
     seasonal = workbook.create_sheet("Сезонные заказы")
     seasonal.append((
         "SKU", "Поставщик", "Категория", "Начало окна", "Конец окна", "Крайний срок",
-        "Дней пропущено", "Приход при заказе сегодня", "Остаток окна, мес",
+        "Приход при заказе сегодня", "Остаток окна, мес",
         "Заказ при сезонном сервисе, шт.", "Заказ при обычном сервисе, шт.",
         "Прогноз остатка на конец сезона, шт.", "Крайний срок следующего сезона", "Решение", "Флаг",
         "Заказ при сезонном сервисе до округления, шт.", "Кратность", "Остаток к приходу, шт.",
@@ -186,7 +212,7 @@ def _append_inventory_sheets(workbook: Workbook, facts: PlanFacts) -> None:
             continue
         seasonal.append((
             row.sku_id, row.supplier_id, row.category, season.window_start.isoformat(), season.window_end.isoformat(),
-            season.deadline.isoformat(), season.days_late, row.arrival_date.isoformat() if row.arrival_date else None,
+            season.deadline.isoformat(), row.arrival_date.isoformat() if row.arrival_date else None,
             round(season.months_remaining, 1), rounded_quantity(season.order_qty, row.order_multiple),
             rounded_quantity(season.ordinary_service_qty, row.order_multiple), round(season.stock_at_season_end),
             season.next_deadline.isoformat(), season.status,
@@ -194,12 +220,12 @@ def _append_inventory_sheets(workbook: Workbook, facts: PlanFacts) -> None:
             round(season.order_qty), row.order_multiple,
             round(season.stock_at_arrival), round(season.target_stock), round(season.safety_stock),
         ))
-        seasonal.cell(seasonal.max_row, 9).number_format = "0.0"
+        seasonal.cell(seasonal.max_row, 8).number_format = "0.0"
 
     for row in excess_rows(facts):
         excess.append((
             row.sku_id, row.supplier_id, row.category, round(row.stock_at_calculation), round(row.in_transit),
-            round(row.coverage_months, 1) if row.coverage_months is not None else None,
+            _coverage_cell(row),
             row.price_decile, round(row.excess_threshold) if row.excess_threshold is not None else None,
             OrderFlag.RESCHEDULE if OrderFlag.RESCHEDULE in row.order_flags else None,
         ))

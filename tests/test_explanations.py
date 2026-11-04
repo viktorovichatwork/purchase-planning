@@ -17,7 +17,7 @@ from purchase_planning.facts import PlanFacts, Recommendation
 def test_only_grounded_clauses_are_published(change):
     cutoff = date(2026, 8, 13)
     facts = PlanFacts(cutoff, cutoff, (
-        Recommendation("SKU-1", "SUP-1", 1234, coverage_months=1.5, markup_pct_12m=30.5),
+        Recommendation("SKU-1", "SUP-1", 1234, coverage_months=1.5, stock_until=date(2026, 9, 28), markup_pct_12m=30.5),
     ))
 
     def reply(_context):

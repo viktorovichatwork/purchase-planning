@@ -1,11 +1,13 @@
-from datetime import date
+from datetime import date, timedelta
 from xml.etree import ElementTree
 
 from openpyxl import load_workbook
 
 from purchase_planning.dashboard import write_dashboard
 from purchase_planning.explanations import Explanations
-from purchase_planning.facts import OrderFlag, PlanFacts, Recommendation, Segment, SupplierSummary, SupplierTiming
+from purchase_planning.facts import (
+    OrderFlag, PlanFacts, Recommendation, SeasonalOrder, SeasonStatus, Segment, SupplierSummary, SupplierTiming,
+)
 from purchase_planning.report import write_report
 
 
@@ -33,15 +35,18 @@ def test_dashboard_matches_workbook_and_displays_facts(tmp_path):
     workbook = load_workbook(report)
     try:
         totals = [(row[0], row[2]) for row in workbook.active.values if row[1] == "Итого"]
-        assert [(row[0].text, int(row[2].text.split()[0])) for row in suppliers] == totals == [("А<&", 9), ("Б", 1)]
+        assert [(row[0].text, int(row.find("span[@class='batch']").text.split()[-2])) for row in suppliers] == totals
+        assert totals == [("А<&", 9), ("Б", 1)]
     finally:
         workbook.close()
-    assert [row[1].text for row in suppliers] == ["Сейчас · пора заказывать", "01.10.2026"]
+    assert [row[1].text for row in suppliers] == [
+        "Когда заказать — Сейчас · запас ниже точки заказа", "Когда заказать — 01.10.2026",
+    ]
     assert len(page.findall(".//details/ul/li")) == 3
     assert page.findall(".//details/ul/li/dl/dt")[0].text == "К заказу, шт."
     assert page.find(".//a").attrib["href"] == "report.xlsx"
     visible_text = "".join(page.itertext())
-    for value in ("13.08.2026", "36 дн.", "Черновик, не размещать", "Первый запуск",
+    for value in ("13.08.2026", "36 дней", "Черновик, не размещать", "Первый запуск",
                   "Зависший заказ", "Хвост заказа", "Условно к закупке"):
         assert value in visible_text
 
@@ -72,11 +77,54 @@ def test_risk_table_uses_workbook_order_and_hides_losses_below_one(tmp_path):
         assert [(row[0], row[-1]) for row in list(workbook["Риски дефицита"].values)[1:]] == expected
         rows = page.findall(".//div[@aria-label='Риски дефицита']/table/tbody/tr")
         assert [(row[0].text, int(row[-1].text)) for row in rows] == [*expected[:2], expected[-1]]
-        assert workbook["Избыток"]["F2"].value == 12.3
-        assert page.find(".//div[@aria-label='Избыток']/table/tbody/tr/td[5]").text == "12,3"
+        assert workbook["Избыток"]["F2"].value == "> 12,3"
+        assert page.find(".//div[@aria-label='Избыток']/table/tbody/tr/td[5]").text == "> 12,3"
     finally:
         workbook.close()
     visible_text = "".join(page.itertext())
-    assert "ещё 1 незначительных" in visible_text
+    assert "ещё 1 незначительный риск" in visible_text
     assert "Пояснение LLM · Сводка <&" in visible_text
     assert "Пояснение LLM · К заказу 1 шт." in visible_text
+
+
+def test_dashboard_splits_supplier_batches_and_uses_calendar_dates_in_decision(tmp_path):
+    day = date(2026, 8, 13)
+    in_30 = day + timedelta(days=30)
+    in_31 = day + timedelta(days=31)
+    timing = SupplierTiming(20, "История", 60)
+
+    def season(deadline):
+        return SeasonalOrder(
+            window_start=deadline + timedelta(days=20), window_end=deadline + timedelta(days=60),
+            deadline=deadline, days_late=0, months_remaining=1.3, order_qty=5.1, ordinary_service_qty=6,
+            stock_at_season_end=0, next_deadline=date(2027, 9, 12), status=SeasonStatus.ON_TIME,
+            stock_at_arrival=0, target_stock=6, safety_stock=0,
+        )
+
+    facts = PlanFacts(day, day, (
+        Recommendation("SKU-1", "SUP-Z", 7.2, regular_order_qty=2.1, regular_order_date=day - timedelta(days=1),
+                       seasonal_order=season(in_30), stock_at_calculation=0),
+        Recommendation("SKU-2", "SUP-A", 5.1, regular_order_qty=0, seasonal_order=season(in_31)),
+        Recommendation("SKU-3", "SUP-B", 4, regular_order_qty=4, regular_order_date=in_30),
+    ), suppliers=(
+        SupplierSummary("SUP-A", timing, 6, False, in_31),
+        SupplierSummary("SUP-B", timing, 4, True, in_30),
+        SupplierSummary("SUP-Z", timing, 9, True, day - timedelta(days=1)),
+    ))
+    dashboard = tmp_path / "index.html"
+    write_dashboard(facts, dashboard, run_date=day + timedelta(days=2), previous_run=None, changes=[])
+    page = ElementTree.fromstring(dashboard.read_text(encoding="utf-8").split("\n", 1)[1])
+    suppliers = page.findall(".//details/summary")
+    assert [supplier.find("strong").text for supplier in suppliers] == ["SUP-Z", "SUP-B", "SUP-A"]
+    assert [batch.text for batch in suppliers[0].findall("span[@class='batch']")] == [
+        "Обычная партия — Сейчас — 3 шт.", "Сезонная партия — до 12.09.2026 — 6 шт.",
+    ]
+    assert "запас ниже точки заказа" in "".join(suppliers[0].itertext())
+    assert "опоздание" not in "".join(page.itertext())
+    assert "2 дня на дату запуска" in "".join(page.itertext())
+    metrics = {metric.find("dt").text: metric.find("dd").text for metric in page.findall(".//dl[@class='decision']/div")}
+    assert metrics["К заказу сейчас, шт."] == "3"
+    assert metrics["Сезонные партии с крайним сроком в ближайшие 90 дней, шт."] == "12"
+    assert metrics["Поставщиков в следующие 30 дней"] == "2"
+    calendar = page.findall(".//{http://www.w3.org/2000/svg}text")
+    assert [node.text for node in calendar[:4]] == ["авг. 2026", "1", "сент. 2026", "3"]

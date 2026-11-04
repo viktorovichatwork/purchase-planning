@@ -701,6 +701,7 @@ def test_first_stockout_before_in_transit_receipt(export):
     facts = plan(export)
     row = facts.recommendations[0]
     assert row.stock_until == date(2026, 3, 31)
+    assert row.coverage_months == pytest.approx(2)
     assert row.stockout_risk
     assert row.stockout_days == 30
     assert row.lost_sales == pytest.approx(30)
@@ -711,6 +712,8 @@ def test_first_stockout_before_in_transit_receipt(export):
     try:
         _, risk = list(with_workbook["Риски дефицита"].values)
         assert risk[:5] == ("SKU-1", "SUP-1", 60, 100, "2026-03-31")
+        headers, forecast = list(with_workbook["Прогноз"].values)
+        assert forecast[headers.index("Покрытие, мес")] == 2
     finally:
         with_workbook.close()
 

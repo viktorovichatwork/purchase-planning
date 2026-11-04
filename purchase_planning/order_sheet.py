@@ -23,10 +23,25 @@ def displayed_order_qty(row: Recommendation) -> int:
     return rounded_quantity(row.order_qty, row.order_multiple)
 
 
-def order_date_label(day: date, as_of: date, *, date_format: str = "%Y-%m-%d") -> str:
-    if day < as_of:
-        return f"Сейчас (опоздание {(as_of - day).days} дней)"
-    return "Сейчас" if day == as_of else day.strftime(date_format)
+def order_date_label(
+    day: date, as_of: date, *, date_format: str = "%Y-%m-%d", below_reorder_point: bool = False,
+) -> str:
+    if day > as_of:
+        return day.strftime(date_format)
+    return "Сейчас · запас ниже точки заказа" if below_reorder_point else "Сейчас"
+
+
+def stock_below_reorder_point(row: Recommendation) -> bool:
+    return row.stock_at_calculation <= 0 or (
+        row.stock_until is not None and row.arrival_date is not None and row.stock_until < row.arrival_date
+    )
+
+
+def coverage_text(row: Recommendation) -> str:
+    if row.coverage_months is None:
+        return "Нет прогноза"
+    prefix = "> " if row.stock_until is None else ""
+    return prefix + f"{row.coverage_months:.1f}".replace(".", ",")
 
 
 def supplier_orders(facts: PlanFacts) -> list[SupplierOrder]:

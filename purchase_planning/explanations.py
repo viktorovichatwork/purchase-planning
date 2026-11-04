@@ -8,7 +8,8 @@ from urllib.request import Request, urlopen
 
 from purchase_planning.comparison import DRIVER_LABELS, Change, count_changes
 from purchase_planning.facts import CategoryProfile, PlanFacts, Recommendation
-from purchase_planning.order_sheet import displayed_order_qty, rounded_quantity
+from purchase_planning.order_sheet import coverage_text, displayed_order_qty, rounded_quantity
+from purchase_planning.wording import days_text
 
 DEFAULT_MODEL = "claude-sonnet-5.5"
 ENDPOINT = "https://api.experientiallabs.ai/v1/chat/completions"
@@ -31,7 +32,7 @@ def _row_clauses(row: Recommendation, profile: CategoryProfile | None, lead_days
             f"годовая оценка спроса — {row.annual_demand_qty:.0f} шт."
         )
         supply = f"Остаток на дату среза — {row.stock_at_calculation:.0f} шт., в пути — {row.in_transit:.0f} шт."
-        clauses["supply"] = f"{supply} Плечо — {lead_days} дней." if lead_days is not None else supply
+        clauses["supply"] = f"{supply} Плечо — {days_text(lead_days)}." if lead_days is not None else supply
     if profile and profile.is_seasonal:
         share = f"{fsum(profile.weight_for(month) for month in profile.season_window) * 100:.1f}".replace(".", ",")
         clauses["season_profile"] = f"На окно сезона приходится {share}% годового спроса категории."
@@ -45,8 +46,7 @@ def _row_clauses(row: Recommendation, profile: CategoryProfile | None, lead_days
     if row.order_multiple > 1:
         clauses["multiple"] = f"Кратность заказа — {row.order_multiple} шт."
     if row.coverage_months is not None:
-        coverage = f"{row.coverage_months:.1f}".replace(".", ",")
-        clauses["coverage"] = f"Покрытие запаса — {coverage} мес."
+        clauses["coverage"] = f"Покрытие запаса — {coverage_text(row)} мес."
     if row.markup_pct_12m is not None:
         markup = f"{row.markup_pct_12m:.1f}".replace(".", ",")
         clauses["markup"] = f"Наценка за 12 месяцев — {markup}%."
