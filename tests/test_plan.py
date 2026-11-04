@@ -1161,6 +1161,21 @@ def test_run_history_compares_the_same_export_and_preserves_parameters(export, t
         finally:
             workbook.close()
 
+def test_new_decision_facts_compare_with_old_runs_without_rewriting_history(export, tmp_path):
+    history = tmp_path / "runs"
+    first = run_plan(export, history, stub_llm=True)
+    old = json.loads((first / "facts.json").read_text(encoding="utf-8"))
+    for row in old["recommendations"]:
+        row.pop("decision")
+    (first / "facts.json").write_text(json.dumps(old, ensure_ascii=False), encoding="utf-8")
+    original = {path.name: path.read_bytes() for path in first.iterdir() if path.is_file()}
+    second = run_plan(export, history, stub_llm=True)
+    assert json.loads((second / "diff.json").read_text(encoding="utf-8"))["changes"] == []
+    assert {path.name: path.read_bytes() for path in first.iterdir() if path.is_file()} == original
+    current = json.loads((second / "facts.json").read_text(encoding="utf-8"))
+    assert all(row["decision"] is not None for row in current["recommendations"])
+
+
 def test_run_comparison_uses_saved_segment_and_observed_drivers(export, tmp_path):
     history = tmp_path / "runs"
     sales = export / "sales_monthly.csv"

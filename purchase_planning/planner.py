@@ -1,4 +1,3 @@
-import json
 from calendar import monthrange
 from collections import defaultdict
 from collections.abc import Iterable
@@ -12,16 +11,17 @@ from purchase_planning.calibration import read_backtest
 from purchase_planning.demand import (
     DEMAND_WINDOW_MONTHS, apply_analog_levels, category_profiles, estimate_sku_demand,
 )
-from purchase_planning.export import ExportValidationError, finite_quantity, read_export
+from purchase_planning.export import ExportValidationError
 from purchase_planning.facts import (
-    ESTIMATED_CUTOFF_SOURCE, NO_SUPPLIER_FLAG, TYPICAL_TIMING_FLAG, TYPICAL_TIMING_SOURCE, DemandType, OrderFlag,
+    NO_SUPPLIER_FLAG, TYPICAL_TIMING_FLAG, TYPICAL_TIMING_SOURCE, DecisionReason, DemandType, OrderFlag,
     PlanFacts, Recommendation, Segment, SupplierSummary, SupplierTiming,
 )
 from purchase_planning.inventory import forecast_period, project_stock
-from purchase_planning.order_sheet import displayed_order_qty
+from purchase_planning.orders import displayed_order_qty
+from purchase_planning.prepared_export import PreparedExport, prepare_export
 from purchase_planning.replenishment import InventoryPlan, SeasonalBatch, matching_seasonal_batch, plan_inventory
 from purchase_planning.segments import Sale, classify_sku, in_assortment_window, month_index
-from purchase_planning.supply import PurchaseLine, Receipt, classify_transit, read_supply, read_supply_history
+from purchase_planning.supply import PurchaseLine, Receipt, classify_transit, read_supply
 
 STOCK_HISTORY_START = date(2024, 1, 1)
 
@@ -32,11 +32,6 @@ class Calculation:
     sales: dict[str, list[Sale]]
     receipts: list[Receipt]
     orders: list[PurchaseLine]
-
-
-def _month_end(month: str) -> date:
-    first = date.fromisoformat(f"{month}-01")
-    return first.replace(day=monthrange(first.year, first.month)[1])
 
 
 def _typical_timing(timings: Iterable[SupplierTiming]) -> SupplierTiming | None:
@@ -59,72 +54,6 @@ def _complete_stock_months(as_of: date, partial_months: set[date]) -> tuple[date
     return tuple(months)
 
 
-def _estimate_cutoff(
-    monthly_totals: dict[int, float], complete_months: set[int], partial_month: date,
-) -> date | None:
-    month = month_index(partial_month)
-    recent_months = sorted(complete_months)[-2:]
-    prior_months = {month - 12, *(recent - 12 for recent in recent_months)}
-    if len(recent_months) != 2 or not prior_months.issubset(complete_months):
-        return None
-
-    prior_recent = fsum(monthly_totals[recent - 12] for recent in recent_months)
-    if prior_recent <= 0:
-        return None
-    growth = fsum(monthly_totals[recent] for recent in recent_months) / prior_recent
-    expected = monthly_totals[month - 12] * growth
-    if expected <= 0:
-        return None
-    days = partial_month.day
-    day = round(days * monthly_totals[month] / expected)
-    return partial_month.replace(day=max(1, min(day, days - 1)))
-
-
-def _read_cutoff(
-    path: Path, sales_rows: list[tuple[str, Sale]], partial_months: set[date],
-    orders: list[PurchaseLine], receipts: list[Receipt],
-) -> tuple[date, str]:
-    try:
-        contents = path.read_text(encoding="utf-8-sig")
-    except FileNotFoundError:
-        complete_months = {sale.month for _, sale in sales_rows} - partial_months
-        latest_receipt = max((receipt.received for receipt in receipts), default=None)
-        latest_order = max((line.placed for line in orders), default=None)
-        last_month = max(complete_months | partial_months, default=None)
-        if last_month is not None and last_month in partial_months:
-            monthly_totals: dict[int, float] = defaultdict(float)
-            for _, sale in sales_rows:
-                monthly_totals[month_index(sale.month)] += sale.quantity
-            estimate = _estimate_cutoff(monthly_totals, {month_index(month) for month in complete_months}, last_month)
-            if estimate is not None:
-                cutoff = max(day for day in (estimate, latest_receipt, latest_order) if day is not None)
-                return cutoff, ESTIMATED_CUTOFF_SOURCE
-
-        candidates = (
-            (max(complete_months, default=None), "по последнему полному месяцу продаж"),
-            (latest_receipt, "по последнему приходу"),
-            (latest_order, "по последнему заказу"),
-        )
-        latest = max(((day, source) for day, source in candidates if day is not None), key=lambda item: item[0], default=None)
-        if latest is None:
-            raise ExportValidationError(["В выгрузке нет дат для определения даты среза."]) from None
-        day, source = latest
-        return day, f"{source} {day:%d.%m.%Y}"
-    except (OSError, UnicodeError):
-        raise ExportValidationError(["Не удалось прочитать export_meta.json в UTF-8."]) from None
-
-    try:
-        value = json.loads(contents)["cutoff_date"]
-        cutoff = date.fromisoformat(value)
-        if cutoff.isoformat() != value:
-            raise ValueError
-    except (KeyError, TypeError, ValueError):
-        raise ExportValidationError(
-            ["export_meta.json: укажите cutoff_date в формате YYYY-MM-DD."]
-        ) from None
-    return cutoff, "по явно заданной дате выгрузки"
-
-
 def _sku_known_at(row: dict[str, str], as_of: date) -> bool:
     try:
         created = date.fromisoformat(f"{row['created']}-01")
@@ -132,47 +61,6 @@ def _sku_known_at(row: dict[str, str], as_of: date) -> bool:
         # Older exports can lack a creation month.
         return True
     return created <= as_of
-
-
-def read_monthly_history(
-    tables: dict[str, list[dict[str, str]]],
-) -> tuple[list[tuple[str, Sale]], dict[tuple[str, date], float], set[date]]:
-    reasons: list[str] = []
-    sales_rows: list[tuple[str, Sale]] = []
-    partial_months: set[date] = set()
-    for row in tables["sales_monthly"]:
-        try:
-            month_end = _month_end(row["month"])
-            quantity = finite_quantity(row["qty_sold"])
-            returns = finite_quantity(row["qty_returned"].strip() or "0")
-            if row["partial_month"] not in {"0", "1"}:
-                raise ValueError
-        except ValueError:
-            reasons.append(
-                f"sales_monthly.csv, SKU {row['sku_id']}: проверьте month (YYYY-MM), "
-                "qty_sold и qty_returned (числа), partial_month (0 или 1)."
-            )
-            continue
-        try:
-            markup = finite_quantity(row["markup_pct"])
-        except ValueError:
-            markup = None
-        partial = row["partial_month"] == "1"
-        sales_rows.append((row["sku_id"], Sale(month_end, quantity, returns, markup, partial)))
-        if partial:
-            partial_months.add(month_end)
-
-    stock: dict[tuple[str, date], float] = {}
-    for row in tables["stock_monthly"]:
-        try:
-            stock[row["sku_id"], _month_end(row["month"])] = finite_quantity(row["stock_qty"])
-        except ValueError:
-            reasons.append(
-                f"stock_monthly.csv, SKU {row['sku_id']}: проверьте month (YYYY-MM) и stock_qty (число)."
-            )
-    if reasons:
-        raise ExportValidationError(reasons)
-    return sales_rows, stock, partial_months
 
 
 def plan(data_dir: str | Path, as_of: date | None = None) -> PlanFacts:
@@ -183,14 +71,17 @@ def calculate(
     data_dir: str | Path, as_of: date | None = None, *,
     backtest_dir: Path | None = None,
 ) -> Calculation:
-    directory = Path(data_dir)
-    tables = read_export(directory)
-    sales_rows, stock, partial_months = read_monthly_history(tables)
-    order_history, receipt_history = read_supply_history(tables)
+    return calculate_export(prepare_export(data_dir), as_of, backtest_dir=backtest_dir)
 
-    cutoff, cutoff_source = _read_cutoff(
-        directory / "export_meta.json", sales_rows, partial_months, order_history, receipt_history,
-    )
+
+def calculate_export(
+    export: PreparedExport, as_of: date | None = None, *, backtest_dir: Path | None = None,
+) -> Calculation:
+    """Calculate one date from a prepared export without rereading the ERP files."""
+    directory, tables = export.directory, export.tables
+    sales_rows, stock, partial_months = export.sales_rows, export.stock, export.partial_months
+    order_history, receipt_history = export.orders, export.receipts
+    cutoff, cutoff_source = export.cutoff, export.cutoff_source
     calculation_date = cutoff if as_of is None else as_of
     if calculation_date > cutoff:
         raise ExportValidationError(["Дата расчёта позже даты среза."])
@@ -201,7 +92,7 @@ def calculate(
         known_skus = {sku for sku, sale in sales_rows if sale.month <= calculation_date}
         sku_rows = [row for row in sku_rows if row["sku_id"] in known_skus or _sku_known_at(row, calculation_date)]
     sku_categories = {row["sku_id"]: row["category"] for row in sku_rows}
-    stock_month = _month_end(calculation_date.strftime("%Y-%m"))
+    stock_month = calculation_date.replace(day=monthrange(calculation_date.year, calculation_date.month)[1])
     month_start = calculation_date.replace(day=1)
     forecast_start = calculation_date + timedelta(days=1)
     know_month_sales = calculation_date == cutoff or (
@@ -289,16 +180,21 @@ def calculate(
             low_data=demand.low_data,
         )
         segment = assortment.segment
+        decision = assortment.decision
+        reasons = list(decision.reasons)
         flags = list(assortment.flags)
         unknown_supplier = not supplier or sku_row["supply_type"] == "unknown"
         if unknown_supplier:
             flags.append(NO_SUPPLIER_FLAG)
+            reasons.append(DecisionReason.MISSING_SUPPLIER)
         selling = segment in {Segment.PURCHASE, Segment.CONDITIONAL} and assortment.sales_qty_12m > 0
         unknown_timing = unknown_supplier or supplier_timing.horizon_days is None
         if selling and unknown_timing and typical_timing is not None:
             # The buyer has to name a supplier. Until then the order is sized on a typical supplier.
             supplier_timing, unknown_supplier = typical_timing, False
             typical_skus.add(sku)
+            reasons.append(DecisionReason.TYPICAL_TIMING)
+            decision = replace(decision, typical_timing=typical_timing)
             segment = Segment.CONDITIONAL
             flags.append(f"{TYPICAL_TIMING_FLAG} {typical_timing.lead_days} дн.")
         lead, cycle = supplier_timing.lead_days, supplier_timing.cycle_days
@@ -306,8 +202,10 @@ def calculate(
             flags.append("Не определено плечо поставки")
         if cycle is None:
             flags.append("Нет истории для цикла")
-        if selling and demand.long_stockout:
-            segment = Segment.CONDITIONAL
+        if demand.long_stockout:
+            reasons.append(DecisionReason.LONG_STOCKOUT)
+            if selling:
+                segment = Segment.CONDITIONAL
         try:
             decile = float(sku_row["price_decile"])
             price_decile = int(decile) if decile in range(1, 11) else None
@@ -327,6 +225,7 @@ def calculate(
                 order_flags=tuple(sorted(order_flags.get(sku, ()))), segment=segment, is_new=assortment.is_new,
                 markup_pct_12m=assortment.markup_pct_12m, sales_qty_12m=assortment.sales_qty_12m,
                 sku_flags=tuple(flags), annual_demand_qty=annual_level, category=profile.category,
+                decision=replace(decision, reasons=tuple(reasons)),
                 demand_type=demand.demand_type, order_multiple=order_multiples.get(sku, 1), price_decile=price_decile,
             ),
             inventory, supplier_timing, backtest, known_supplier=not unknown_supplier, has_open_orders=sku in open_skus,

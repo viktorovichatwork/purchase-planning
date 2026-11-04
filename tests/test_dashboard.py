@@ -182,6 +182,18 @@ def test_dashboard_splits_supplier_batches_and_uses_calendar_dates_in_decision(t
     page = ElementTree.fromstring(dashboard.read_text(encoding="utf-8").split("\n", 1)[1])
     suppliers = page.findall(".//section[@id='orders']/div/div/details/summary")
     assert [supplier.find("strong").text for supplier in suppliers] == ["SUP-Z", "SUP-B", "SUP-A"]
+    report = tmp_path / "report.xlsx"
+    write_report(facts, report, run_date=day)
+    workbook = load_workbook(report)
+    try:
+        totals = [(row[0], row[3]) for row in workbook.active.values if row[1] == "Итого"]
+        assert totals == [("SUP-Z", 11), ("SUP-B", 4), ("SUP-A", 6)]
+        _, _, headers, *report_rows = workbook.active.values
+        supplier_date = headers.index("Дата заказа у поставщика")
+        # The ordinary batch is due even when the legacy SKU-level order_by is absent.
+        assert report_rows[0][supplier_date] == "Сейчас · запас ниже точки заказа"
+    finally:
+        workbook.close()
     assert [batch.text for batch in suppliers[0].findall("span[@class='batch']")] == [
         "Обычная партия — Сейчас — 3 шт.",
         "Обычная партия — 12.09.2026 — 2 шт.",

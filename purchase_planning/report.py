@@ -8,22 +8,23 @@ from openpyxl.comments import Comment
 from openpyxl.styles import Font
 from openpyxl.worksheet.worksheet import Worksheet
 
-from purchase_planning.actions import Action, SkipReason, action, skip_reason, todo_text, why_text
+from purchase_planning.actions import Action, SkipReason, action, decision_facts, skip_reason, todo_text, why_text
 from purchase_planning.calibration import METRIC_HEADERS, stock_multiplier
 from purchase_planning.facts import (
-    TYPICAL_TIMING_FLAG, UNCONFIRMED_ORDERS_LABEL, OrderFlag, PlanFacts, Recommendation, Segment,
+    UNCONFIRMED_ORDERS_LABEL, OrderFlag, PlanFacts, Recommendation, Segment,
 )
 from purchase_planning.order_sheet import (
-    coverage_text, displayed_order_qty, excess_rows, open_orders_text, order_date_label, rounded_quantity,
-    stock_below_reorder_point,
-    stockout_rows, supplier_orders,
+    coverage_text, excess_rows, open_orders_text, order_date_label, stockout_rows,
+)
+from purchase_planning.orders import (
+    OrderPlan, displayed_order_qty, prepare_orders, rounded_quantity, stock_below_reorder_point,
 )
 from purchase_planning.parameters import (
     PARAMETER_NUMBER_FORMATS, STALE_EXPORT_DAYS, STALE_EXPORT_STATUS, llm_max_skus, run_parameters,
 )
 from purchase_planning.replenishment import inventory_summary
 from purchase_planning.sku_labels import category_name
-from purchase_planning.summary import ORDER_SOON_DAYS, order_batches, plan_summary, season_order_soon, summary_tiles
+from purchase_planning.summary import ORDER_SOON_DAYS, plan_summary, season_order_soon, summary_tiles
 from purchase_planning.wording import days_text
 
 
@@ -104,34 +105,25 @@ def write_report(
         action_sheets[group].freeze_panes = "C2"
     for sku_sheet in (sheet, forecast_sheet):
         sku_sheet.column_dimensions["C"].width = 48
-    orders = supplier_orders(facts)
-    supplier_dates = {}
-    due_suppliers = set()
-    for supplier, group, _ in orders:
-        summary = summaries.get(supplier)
-        batches = [
-            batch for row in group
-            for batch in order_batches(row, summary.next_order_date if summary else None, facts.as_of)
-        ]
-        if supplier and batches:
-            deadline = min(batch.deadline for batch in batches)
-            if deadline <= facts.as_of:
-                due_suppliers.add(supplier)
-            supplier_dates[supplier] = order_date_label(
-                deadline, facts.as_of,
-                below_reorder_point=any(
-                    row.order_by is not None and row.order_by <= facts.as_of and stock_below_reorder_point(row)
-                    for row in group
-                ),
-            )
+    orders = prepare_orders(facts)
+    supplier_dates = {
+        schedule.supplier_id: order_date_label(
+            schedule.deadline, facts.as_of, below_reorder_point=schedule.low_stock,
+        )
+        for schedule in orders.suppliers if schedule.supplier_id
+    }
+    due_suppliers = {schedule.supplier_id for schedule in orders.suppliers if schedule.due}
 
     def append_sku(target: Worksheet, row: Recommendation) -> None:
         summary = summaries.get(row.supplier_id)
         timing = summary.timing if summary else None
-        if facts.typical_timing is not None and any(flag.startswith(TYPICAL_TIMING_FLAG) for flag in row.sku_flags):
-            timing = facts.typical_timing
+        decision = decision_facts(row, facts.typical_timing)
+        if decision.typical_timing is not None:
+            timing = decision.typical_timing
         season = row.seasonal_order
-        regular_placement = row.order_by if row.grouped_season_deadline else row.regular_order_date
+        batches = orders.batches_by_sku[row.sku_id]
+        regular_batch = next((batch for batch in batches if not batch.seasonal), None)
+        seasonal_batch = next((batch for batch in batches if batch.seasonal), None)
         transit = ", ".join(f"{month:%Y-%m} — {round(quantity)}" for month, quantity in row.in_transit_by_month)
         if sum(round(qty) for _, qty in row.in_transit_by_month) != round(row.in_transit):
             transit += f" · итого {round(row.in_transit)} шт."
@@ -156,12 +148,12 @@ def write_report(
             _stock_until_label(row),
             _sku_order_date(row, row.order_by, facts.as_of),
             supplier_dates.get(row.supplier_id),
-            rounded_quantity(row.regular_order_qty, row.order_multiple) if row.regular_order_qty else None,
-            rounded_quantity(season.order_qty, row.order_multiple) if season and season.actionable else None,
+            regular_batch.quantity if regular_batch else None,
+            seasonal_batch.quantity if seasonal_batch else None,
             row.grouped_season_deadline.isoformat() if row.grouped_season_deadline else (
                 season.deadline.isoformat() if season else None
             ),
-            _sku_order_date(row, regular_placement or facts.as_of, facts.as_of) if row.regular_order_qty else None,
+            _sku_order_date(row, regular_batch.deadline, facts.as_of) if regular_batch else None,
         )
         offset = 0
         if target is sheet:
@@ -178,7 +170,8 @@ def write_report(
         target.cell(target.max_row, offset + headers.index("К заказу до округления, шт.") + 1).number_format = "0"
         target.cell(target.max_row, offset + headers.index("Покрытие, мес") + 1).number_format = "0.0"
 
-    for supplier, group, total in orders:
+    for schedule in orders.suppliers:
+        supplier, group, total = schedule.supplier_id, schedule.lines, schedule.quantity
         for row in group:
             append_sku(sheet, row)
         summary = summaries.get(supplier)
@@ -228,7 +221,7 @@ def write_report(
                     "Наценка взвешена по проданным штукам.", "Планирование закупок",
                 )
 
-    _append_inventory_sheets(workbook, facts, labels)
+    _append_inventory_sheets(workbook, facts, labels, orders)
     _append_backtest(workbook.create_sheet("Бэктест"), facts)
     parameter_sheet = workbook.create_sheet("Параметры")
     parameter_sheet.append(("Параметр", "Значение"))
@@ -248,7 +241,9 @@ def write_report(
     workbook.save(path)
 
 
-def _append_inventory_sheets(workbook: Workbook, facts: PlanFacts, labels: Mapping[str, str]) -> None:
+def _append_inventory_sheets(
+    workbook: Workbook, facts: PlanFacts, labels: Mapping[str, str], orders: OrderPlan,
+) -> None:
     seasonal = workbook.create_sheet("Сезонные заказы")
     seasonal.append((
         "SKU", "Товар", "Поставщик", "Категория", "Начало окна", "Конец окна", "Крайний срок",
@@ -267,7 +262,7 @@ def _append_inventory_sheets(workbook: Workbook, facts: PlanFacts, labels: Mappi
                   "Приход при заказе сегодня", "Дней без товара", "Упущенные продажи, шт."))
     summary_sheet = workbook.create_sheet("Сводка")
     summary_sheet.append(("Показатель", "Количество"))
-    summary = plan_summary(facts)
+    summary = plan_summary(facts, orders)
     # The same SKU counts as the portal tiles, then how each group splits.
     for tile in summary_tiles(summary):
         summary_sheet.append((tile.label, tile.count))

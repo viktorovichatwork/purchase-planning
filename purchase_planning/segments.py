@@ -3,7 +3,7 @@ from datetime import date
 from enum import StrEnum
 from math import fsum
 
-from purchase_planning.facts import Segment
+from purchase_planning.facts import DecisionFacts, DecisionReason, Segment
 
 PURCHASE_MARKUP_PCT = 25
 ASSORTMENT_MONTHS = 12
@@ -40,6 +40,7 @@ class Assortment:
     markup_pct_12m: float | None
     sales_qty_12m: float
     flags: tuple[str, ...]
+    decision: DecisionFacts
 
 
 def in_assortment_window(month: date, *, as_of: date, last_complete_month: int) -> bool:
@@ -100,4 +101,15 @@ def classify_sku(
     else:
         segment = Segment.PURCHASE
     is_new = first_sale is not None and in_assortment_window(first_sale, **window)
-    return Assortment(segment, is_new, markup, sold, tuple(flags))
+    reasons = []
+    if review_reason == ReviewReason.MISSING_COST:
+        reasons.append(DecisionReason.MISSING_COST)
+    if markup is not None and markup < PURCHASE_MARKUP_PCT:
+        reasons.append(DecisionReason.LOW_MARKUP)
+    if low_data:
+        reasons.append(DecisionReason.LOW_DATA)
+    if insufficient_markup:
+        reasons.append(DecisionReason.MISSING_MARKUP)
+    return Assortment(
+        segment, is_new, markup, sold, tuple(flags), DecisionFacts(tuple(reasons), PURCHASE_MARKUP_PCT),
+    )

@@ -15,7 +15,8 @@ from urllib.request import Request, urlopen
 
 from purchase_planning.comparison import DRIVER_LABELS, Change, count_changes
 from purchase_planning.facts import CategoryProfile, PlanFacts, Recommendation
-from purchase_planning.order_sheet import coverage_text, displayed_order_qty, rounded_quantity
+from purchase_planning.order_sheet import coverage_text
+from purchase_planning.orders import displayed_order_qty, rounded_quantity
 from purchase_planning.parameters import DEFAULT_LLM_MAX_SKUS
 from purchase_planning.wording import days_text
 

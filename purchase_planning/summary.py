@@ -8,37 +8,12 @@ from datetime import date, timedelta
 
 from purchase_planning.actions import Action, SkipReason, action, skip_reason
 from purchase_planning.facts import PlanFacts, Recommendation
-from purchase_planning.order_sheet import displayed_order_qty, excess_rows, rounded_quantity, stockout_rows
+from purchase_planning.order_sheet import excess_rows, stockout_rows
+from purchase_planning.orders import OrderPlan, prepare_orders
 from purchase_planning.wording import days_text
 
 ORDER_SOON_DAYS = 30
 SEASON_SOON_DAYS = 90
-
-
-@dataclass(frozen=True)
-class OrderBatch:
-    deadline: date
-    quantity: int
-    seasonal: bool
-
-
-def order_batches(row: Recommendation, next_order_date: date | None, as_of: date) -> list[OrderBatch]:
-    """The seasonal and the ordinary part of a SKU order, each with its order-by date."""
-    if row.order_qty <= 0:
-        return []
-    batches = []
-    season = row.seasonal_order
-    seasonal_qty = 0
-    if season and season.actionable:
-        seasonal_qty = rounded_quantity(season.order_qty, row.order_multiple)
-        batches.append(OrderBatch(season.deadline, seasonal_qty, True))
-    ordinary_qty = displayed_order_qty(row) - seasonal_qty
-    if ordinary_qty > 0:
-        placement = row.order_by if row.grouped_season_deadline else row.regular_order_date
-        if row.regular_order_qty is None:
-            placement = placement or row.order_by or next_order_date
-        batches.append(OrderBatch(placement or as_of, ordinary_qty, False))
-    return batches
 
 
 def season_deadline(row: Recommendation, as_of: date) -> date | None:
@@ -90,15 +65,15 @@ class Tile:
     main: bool
 
 
-def plan_summary(facts: PlanFacts) -> PlanSummary:
+def plan_summary(facts: PlanFacts, orders: OrderPlan | None = None) -> PlanSummary:
     as_of = facts.as_of
     soon_until = as_of + timedelta(days=ORDER_SOON_DAYS)
-    next_dates = {supplier.supplier_id: supplier.next_order_date for supplier in facts.suppliers}
+    orders = prepare_orders(facts) if orders is None else orders
     now = soon = later = not_needed = units = 0
     suppliers: set[str] = set()
     due_suppliers: set[str] = set()
     for row in facts.recommendations:
-        batches = order_batches(row, next_dates.get(row.supplier_id), as_of)
+        batches = orders.batches_by_sku[row.sku_id]
         due = [batch for batch in batches if batch.deadline <= as_of]
         # A supplier is due when any of its SKU, ordered or to decide, is due. Without a name nobody can order.
         if due and row.supplier_id:
