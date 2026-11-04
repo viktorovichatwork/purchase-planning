@@ -7,8 +7,8 @@ from purchase_planning.dashboard import write_dashboard
 from purchase_planning.explanations import Explanations
 from purchase_planning.export import REQUIRED_COLUMNS
 from purchase_planning.facts import (
-    BacktestMetric, BacktestResult, OrderFlag, PlanFacts, Recommendation, SeasonalOrder, SeasonStatus, Segment,
-    SupplierSummary, SupplierTiming,
+    ESTIMATED_CUTOFF_SOURCE, UNCONFIRMED_ORDERS_LABEL, BacktestMetric, BacktestResult, OrderFlag, PlanFacts,
+    Recommendation, SeasonalOrder, SeasonStatus, Segment, SupplierSummary, SupplierTiming,
 )
 from purchase_planning.report import write_report
 from purchase_planning.sku_labels import load_sku_labels
@@ -22,11 +22,14 @@ def test_dashboard_matches_workbook_and_displays_facts(tmp_path):
         cutoff, cutoff,
         (
             Recommendation("SKU-1", "А<&", 2.1, order_flags=("Хвост заказа",)),
-            Recommendation("SKU-2", "А<&", 5.1, segment=Segment.CONDITIONAL),
+            Recommendation("SKU-2", "А<&", 5.1, segment=Segment.CONDITIONAL, markup_pct_12m=22,
+                           order_flags=(OrderFlag.UNCONFIRMED,)),
             Recommendation("SKU-3", "Б", 1, order_flags=("Зависший заказ",)),
         ),
+        cutoff_source=ESTIMATED_CUTOFF_SOURCE,
         suppliers=(SupplierSummary("Б", timing, 1, False, date(2026, 10, 1)),
                    SupplierSummary("А<&", timing, 7.2, True)),
+        unconfirmed_order_lines=2,
     )
     report = tmp_path / "report.xlsx"
     dashboard = tmp_path / "index.html"
@@ -40,6 +43,15 @@ def test_dashboard_matches_workbook_and_displays_facts(tmp_path):
         totals = [(row[0], row[3]) for row in workbook.active.values if row[1] == "Итого"]
         assert [(row[0].text, int(row.find("span[@class='batch']").text.split()[-2])) for row in suppliers] == totals
         assert totals == [("А<&", 9), ("Б", 1)]
+        cutoff_row, _, _, headers, *rows = workbook.active.values
+        assert cutoff_row[:2] == ("Дата среза", f"≈ 13.08.2026 · {ESTIMATED_CUTOFF_SOURCE}")
+        assert dict(workbook["Сводка"].values)[UNCONFIRMED_ORDERS_LABEL] == 2
+        confirmation = headers.index("Подтверждение байера")
+        assert {row[1]: row[confirmation] for row in rows if row[1] != "Итого"} == {
+            "SKU-1": None, "SKU-2": "Требует подтверждения", "SKU-3": None,
+        }
+        order_flags = headers.index("Флаги заказов")
+        assert next(row[order_flags] for row in rows if row[1] == "SKU-2") == OrderFlag.UNCONFIRMED
     finally:
         workbook.close()
     assert [row[1].text for row in suppliers] == [
@@ -47,7 +59,16 @@ def test_dashboard_matches_workbook_and_displays_facts(tmp_path):
     ]
     assert len(page.findall(".//section[@id='orders']//ul/li")) == 3
     assert page.findall(".//details[@class='sku-detail']/dl/dt")[0].text == "К заказу, шт."
-    assert page.find(".//a").attrib["href"] == "report.xlsx"
+    assert page.find(".//header//a[@class='upload-action primary']").get("href") == "#upload"
+    assert page.find(".//header//a[@href='report.xlsx']").text == "Скачать черновик XLSX"
+    confirmation = page.find(".//section[@class='confirmation']")
+    assert confirmation.find("h3").text == "Требуют подтверждения"
+    assert confirmation.find(".//small[@class='confirmation-reason']").text == "Наценка ниже 25%"
+    assert "6 шт. к заказу" in "".join(confirmation.itertext())
+    metrics = {metric.find("dt").text: metric.find("dd").text for metric in page.findall(".//dl[@class='decision']/div")}
+    assert metrics["Рекомендация на дату среза, шт."] == "3"
+    assert metrics["Требуют подтверждения, шт."] == "6"
+    assert metrics[UNCONFIRMED_ORDERS_LABEL] == "2"
     visible_text = "".join(page.itertext())
     assert page.find(".//a[@href='#guide']") is not None
     assert page.find(".//section[@id='guide']/h2").text == "Как работать с порталом"
@@ -59,8 +80,8 @@ def test_dashboard_matches_workbook_and_displays_facts(tmp_path):
     assert {name for name in guide_files if name.endswith(".csv")} == {f"{name}.csv" for name in REQUIRED_COLUMNS}
     assert "export_meta.json" not in "".join(upload.itertext())
     assert "Устаревшая выгрузка — черновик, не размещать" in "".join(page.find(".//header").itertext())
-    for value in ("13.08.2026", "36 дней", "Первый запуск",
-                  "Зависший заказ", "Хвост заказа", "Условно к закупке"):
+    for value in (f"Срез ≈ 13.08.2026 · {ESTIMATED_CUTOFF_SOURCE}", "36 дней", "Первый запуск",
+                  "Зависший заказ", "Хвост заказа", "Условно к закупке", OrderFlag.UNCONFIRMED):
         assert value in visible_text
 
 
@@ -118,7 +139,8 @@ def test_dashboard_splits_supplier_batches_and_uses_calendar_dates_in_decision(t
         Recommendation("SKU-1", "SUP-Z", 7.2, regular_order_qty=2.1, regular_order_date=day - timedelta(days=1),
                        seasonal_order=season(in_30), stock_at_calculation=0),
         Recommendation("SKU-2", "SUP-A", 5.1, regular_order_qty=0, seasonal_order=season(in_31)),
-        Recommendation("SKU-3", "SUP-B", 4, regular_order_qty=4, regular_order_date=in_30),
+        Recommendation("SKU-3", "SUP-B", 4, regular_order_qty=4, regular_order_date=in_30, segment=Segment.CONDITIONAL),
+        Recommendation("SKU-4", "SUP-Z", 2, regular_order_qty=2, regular_order_date=in_30),
     ), suppliers=(
         SupplierSummary("SUP-A", timing, 6, False, in_31),
         SupplierSummary("SUP-B", timing, 4, True, in_30),
@@ -130,15 +152,25 @@ def test_dashboard_splits_supplier_batches_and_uses_calendar_dates_in_decision(t
     suppliers = page.findall(".//section[@id='orders']/div/div/details/summary")
     assert [supplier.find("strong").text for supplier in suppliers] == ["SUP-Z", "SUP-B", "SUP-A"]
     assert [batch.text for batch in suppliers[0].findall("span[@class='batch']")] == [
-        "Обычная партия — Сейчас — 3 шт.", "Сезонная партия — до 12.09.2026 — 6 шт.",
+        "Обычная партия — Сейчас · срок 12.08.2026 — 3 шт.",
+        "Обычная партия — 12.09.2026 — 2 шт.",
+        "Сезонная партия — до 12.09.2026 — 6 шт.",
     ]
     assert "запас ниже точки заказа" in "".join(suppliers[0].itertext())
     assert "опоздание" not in "".join(page.itertext())
     assert "2 дня на дату запуска" in "".join(page.itertext())
     metrics = {metric.find("dt").text: metric.find("dd").text for metric in page.findall(".//dl[@class='decision']/div")}
     assert metrics["К заказу сейчас, шт."] == "3"
+    assert metrics["Требуют подтверждения, шт."] == "0"
     assert metrics["Сезонные партии с крайним сроком в ближайшие 90 дней, шт."] == "12"
     assert metrics["Поставщиков в следующие 30 дней"] == "2"
+    primary_action = page.find(".//header//a[@class='primary']")
+    assert primary_action.get("href") == "#orders"
+    assert primary_action.text == "Проверить заказ по поставщикам"
+    assert page.find(".//header//a[@href='report.xlsx']").text == "Скачать XLSX"
+    assert {link.get("href"): link.text for link in page.findall(".//section[@id='overview']//dd/a")} == {
+        "#orders": "1", "#risks": "0",
+    }
     calendar = page.findall(".//{http://www.w3.org/2000/svg}text")
     assert [node.text for node in calendar[:4]] == ["авг. 2026", "1", "сент. 2026", "3"]
 

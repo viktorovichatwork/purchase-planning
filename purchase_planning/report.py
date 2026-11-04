@@ -76,7 +76,9 @@ def write_report(
         "Обычное пополнение, шт.", "Сезонный заказ, шт.", "Крайний срок сезонной партии",
         "Размещение обычной партии",
     )
-    sheet.append(headers)
+    sheet.append((*headers, "Подтверждение байера"))
+    confirmation_column = sheet.cell(row=sheet.max_row, column=len(headers) + 1).column_letter
+    sheet.column_dimensions[confirmation_column].width = 26
     summaries = {supplier.supplier_id: supplier for supplier in facts.suppliers}
     forecast_sheet = workbook.create_sheet("Прогноз")
     forecast_sheet.append((
@@ -111,7 +113,7 @@ def write_report(
         transit = ", ".join(f"{month:%Y-%m} — {round(quantity)}" for month, quantity in row.in_transit_by_month)
         if sum(round(qty) for _, qty in row.in_transit_by_month) != round(row.in_transit):
             transit += f" · итого {round(row.in_transit)} шт."
-        target.append((
+        values = (
             row.supplier_id or "Поставщик не указан", row.sku_id, labels.get(row.sku_id) or None,
             displayed_order_qty(row), row.excluded_stockout_months,
             round(fsum(row.monthly_forecast)), "Да" if row.low_data else None,
@@ -137,7 +139,10 @@ def write_report(
                 season.deadline.isoformat() if season else None
             ),
             _sku_order_date(row, regular_placement or facts.as_of, facts.as_of) if row.regular_order_qty else None,
-        ))
+        )
+        if target is sheet:
+            values += ("Требует подтверждения" if row.segment == Segment.CONDITIONAL else None,)
+        target.append(values)
         for cell in target[target.max_row][:3]:
             cell.data_type = "s"
         for header in ("Остаток на дату прихода", "Целевой запас", "Страховой запас"):
