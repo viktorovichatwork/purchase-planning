@@ -4,14 +4,18 @@ from math import fsum
 from pathlib import Path
 
 from openpyxl import Workbook
+from openpyxl.comments import Comment
 from openpyxl.styles import Font
 from openpyxl.worksheet.worksheet import Worksheet
 
-from purchase_planning.actions import Action, action, todo_text, why_text
+from purchase_planning.actions import Action, SkipReason, action, skip_reason, todo_text, why_text
 from purchase_planning.calibration import METRIC_HEADERS, stock_multiplier
-from purchase_planning.facts import UNCONFIRMED_ORDERS_LABEL, OrderFlag, PlanFacts, Recommendation, Segment
+from purchase_planning.facts import (
+    TYPICAL_TIMING_FLAG, UNCONFIRMED_ORDERS_LABEL, OrderFlag, PlanFacts, Recommendation, Segment,
+)
 from purchase_planning.order_sheet import (
-    coverage_text, displayed_order_qty, excess_rows, order_date_label, rounded_quantity, stock_below_reorder_point,
+    coverage_text, displayed_order_qty, excess_rows, open_orders_text, order_date_label, rounded_quantity,
+    stock_below_reorder_point,
     stockout_rows, supplier_orders,
 )
 from purchase_planning.parameters import (
@@ -19,6 +23,8 @@ from purchase_planning.parameters import (
 )
 from purchase_planning.replenishment import inventory_summary
 from purchase_planning.sku_labels import category_name
+from purchase_planning.summary import ORDER_SOON_DAYS, order_batches, plan_summary, season_order_soon, summary_tiles
+from purchase_planning.wording import days_text
 
 
 def _stock_until_label(row: Recommendation) -> str | None:
@@ -52,14 +58,15 @@ def write_report(
     sheet = workbook.active
     assert sheet is not None
     sheet.title = "Заказ по поставщикам"
-    cutoff_label = facts.cutoff.isoformat()
-    if facts.cutoff_is_estimated:
-        cutoff_label = f"≈ {facts.cutoff:%d.%m.%Y} · {facts.cutoff_source}"
-    sheet.append(("Дата среза", cutoff_label))
-    status = STALE_EXPORT_STATUS if (run_date - facts.cutoff).days > STALE_EXPORT_DAYS else None
+    cutoff_label = f"{facts.cutoff:%d.%m.%Y}"
+    sheet.append(("Данные ERP на", cutoff_label))
+    status = (
+        f"{STALE_EXPORT_STATUS}. Перед заказом загрузите свежую выгрузку ERP."
+        if (run_date - facts.cutoff).days > STALE_EXPORT_DAYS else None
+    )
     sheet.append(("Статус", status))
     if facts.cutoff_source:
-        sheet.append(("Как определена дата среза", facts.cutoff_source))
+        sheet.append(("Как определена дата данных", facts.cutoff_source))
     if facts.supply_warning:
         sheet.append(("Предупреждение", facts.supply_warning))
     if facts.backtest_warning:
@@ -69,7 +76,7 @@ def write_report(
         "Прогноз на горизонт, шт.",
         "Мало данных", "Плечо, дней", "Источник плеча", "Цикл, дней",
         "Остаток на дату расчёта", "Дата прихода нового заказа", "Остаток на дату прихода",
-        "В пути по месяцам", "Флаги заказов", "Флаги поставщика", "Пора заказывать у поставщика",
+        "В пути по месяцам", "Заказы у поставщика", "Флаги заказов", "Флаги поставщика", "Пора заказывать у поставщика",
         "Что делать", "Новинка", "Наценка за 12 мес, %", "Продажи за 12 мес, шт.",
         "Оценка спроса в год, шт.", "Флаги SKU",
         "Целевой запас", "Страховой запас", "Тип спроса", "К заказу до округления, шт.", "Кратность",
@@ -99,11 +106,19 @@ def write_report(
         sku_sheet.column_dimensions["C"].width = 48
     orders = supplier_orders(facts)
     supplier_dates = {}
+    due_suppliers = set()
     for supplier, group, _ in orders:
         summary = summaries.get(supplier)
-        if summary and summary.next_order_date:
+        batches = [
+            batch for row in group
+            for batch in order_batches(row, summary.next_order_date if summary else None, facts.as_of)
+        ]
+        if supplier and batches:
+            deadline = min(batch.deadline for batch in batches)
+            if deadline <= facts.as_of:
+                due_suppliers.add(supplier)
             supplier_dates[supplier] = order_date_label(
-                summary.next_order_date, facts.as_of,
+                deadline, facts.as_of,
                 below_reorder_point=any(
                     row.order_by is not None and row.order_by <= facts.as_of and stock_below_reorder_point(row)
                     for row in group
@@ -113,6 +128,8 @@ def write_report(
     def append_sku(target: Worksheet, row: Recommendation) -> None:
         summary = summaries.get(row.supplier_id)
         timing = summary.timing if summary else None
+        if facts.typical_timing is not None and any(flag.startswith(TYPICAL_TIMING_FLAG) for flag in row.sku_flags):
+            timing = facts.typical_timing
         season = row.seasonal_order
         regular_placement = row.order_by if row.grouped_season_deadline else row.regular_order_date
         transit = ", ".join(f"{month:%Y-%m} — {round(quantity)}" for month, quantity in row.in_transit_by_month)
@@ -126,9 +143,10 @@ def write_report(
             timing.cycle_days if timing else None, round(row.stock_at_calculation),
             row.arrival_date.isoformat() if row.arrival_date else None,
             row.stock_at_arrival,
-            transit or None, ", ".join(row.order_flags) or None,
+            transit or None, open_orders_text(row, facts.as_of) if row.open_orders else None,
+            ", ".join(row.order_flags) or None,
             (", ".join(timing.flags) or None) if timing else None,
-            ("Да" if summary.time_to_order else "Нет") if summary else None,
+            ("Да" if row.supplier_id in due_suppliers else "Нет") if row.supplier_id else None,
             action(row), "Да" if row.is_new else None,
             round(row.markup_pct_12m, 1) if row.markup_pct_12m is not None else None,
             round(row.sales_qty_12m), round(row.annual_demand_qty), ", ".join(row.sku_flags) or None,
@@ -168,7 +186,7 @@ def write_report(
             supplier or "Поставщик не указан", "Итого", None, total,
             *([None] * (headers.index("Флаги поставщика") - headers.index("К заказу") - 1)),
             (", ".join(summary.timing.flags) or None) if summary else None,
-            ("Да" if summary.time_to_order else "Нет") if summary else None,
+            ("Да" if supplier in due_suppliers else "Нет") if supplier else None,
             *([None] * (headers.index("Дата заказа у поставщика") - headers.index("Пора заказывать у поставщика") - 1)),
             supplier_dates.get(supplier),
         ))
@@ -186,21 +204,37 @@ def write_report(
         forecast_sheet.cell(forecast_sheet.max_row, 4 + len(facts.forecast_months)).number_format = "0.0"
         for cell in forecast_sheet[forecast_sheet.max_row][:3]:
             cell.data_type = "s"
+    skip_order = {reason: index for index, reason in enumerate(SkipReason)}
     for group, target in action_sheets.items():
-        # The largest sellers first: they matter most for the buyer's decision.
+        # Match the portal: no-sales rows by stock, price/cost rows by sales, decisions by quantity.
         for row in sorted(
             (row for row in facts.recommendations if action(row) == group),
-            key=lambda row: (-displayed_order_qty(row), -row.sales_qty_12m, row.sku_id),
+            key=lambda row: (
+                skip_order.get(skip_reason(row), -1),
+                -row.stock_at_calculation if skip_reason(row) == SkipReason.NO_SALES else (
+                    -row.sales_qty_12m if group == Action.SKIP else -displayed_order_qty(row)
+                ),
+                row.sku_id,
+            ),
         ):
             append_sku(target, row)
+
+    for target in (sheet, *action_sheets.values()):
+        header_row = next(cells for cells in target if any(cell.value == "Наценка за 12 мес, %" for cell in cells))
+        for cell in header_row:
+            if cell.value in {"Наценка за 12 мес, %", "Продажи за 12 мес, шт."}:
+                cell.comment = Comment(
+                    "Период: 12 полных месяцев плюс текущий неполный месяц, по дату среза ERP. "
+                    "Наценка взвешена по проданным штукам.", "Планирование закупок",
+                )
 
     _append_inventory_sheets(workbook, facts, labels)
     _append_backtest(workbook.create_sheet("Бэктест"), facts)
     parameter_sheet = workbook.create_sheet("Параметры")
     parameter_sheet.append(("Параметр", "Значение"))
-    parameter_sheet.append(("Дата среза", cutoff_label))
+    parameter_sheet.append(("Данные ERP на", cutoff_label))
     if facts.cutoff_source:
-        parameter_sheet.append(("Как определена дата среза", facts.cutoff_source))
+        parameter_sheet.append(("Как определена дата данных", facts.cutoff_source))
     parameter_sheet.append(("Дата расчёта", facts.as_of.isoformat()))
     parameter_sheet.append(("Дата запуска", run_date.isoformat()))
     if parameters is None:
@@ -223,18 +257,30 @@ def _append_inventory_sheets(workbook: Workbook, facts: PlanFacts, labels: Mappi
         "Прогноз остатка на конец сезона, шт.", "Крайний срок следующего сезона", "Решение", "Флаг",
         "Заказ при сезонном сервисе до округления, шт.", "Кратность", "Остаток к приходу, шт.",
         "Целевой запас, шт.", "Страховой запас, шт.",
+        "Сезонный заказ в ближайшие 90 дней",
     ))
     excess = workbook.create_sheet("Избыток")
-    excess.append(("SKU", "Товар", "Поставщик", "Категория", "Остаток", "В пути", "Покрытие, мес",
-                   "Дециль цены", "Порог избытка, шт.", "Флаг"))
+    excess.append(("SKU", "Товар", "Поставщик", "Категория", "Остаток", "В пути", "Заказы у поставщика", "Покрытие, мес",
+                   "Ценовая группа", "Порог избытка, шт.", "Открытый заказ"))
     risks = workbook.create_sheet("Риски дефицита")
-    risks.append(("SKU", "Товар", "Поставщик", "Остаток", "В пути", "Хватит до", "Приход при заказе сегодня",
-                  "Дней без товара", "Упущенные продажи, шт."))
-    summary = workbook.create_sheet("Сводка")
-    summary.append(("Показатель", "Количество"))
-    for name, count in inventory_summary(facts).items():
-        summary.append((name, count))
-    summary.append((UNCONFIRMED_ORDERS_LABEL, facts.unconfirmed_order_lines))
+    risks.append(("SKU", "Товар", "Поставщик", "Остаток", "В пути", "Заказы у поставщика", "Хватит до",
+                  "Приход при заказе сегодня", "Дней без товара", "Упущенные продажи, шт."))
+    summary_sheet = workbook.create_sheet("Сводка")
+    summary_sheet.append(("Показатель", "Количество"))
+    summary = plan_summary(facts)
+    # The same SKU counts as the portal tiles, then how each group splits.
+    for tile in summary_tiles(summary):
+        summary_sheet.append((tile.label, tile.count))
+    summary_sheet.append((f"{Action.ORDER}, всего SKU", summary.order_total))
+    summary_sheet.append((f"{Action.ORDER}: пора заказывать, шт.", summary.order_now_units))
+    summary_sheet.append((f"{Action.ORDER}: пора заказывать, поставщиков", summary.order_now_suppliers))
+    summary_sheet.append((f"{Action.ORDER}: позже чем через {days_text(ORDER_SOON_DAYS)}, SKU", summary.order_later))
+    summary_sheet.append((f"{Action.ORDER}: заказ не нужен, SKU", summary.order_not_needed))
+    for reason, count in summary.skip.items():
+        summary_sheet.append((f"{Action.SKIP}: {reason.lower()}, SKU", count))
+    summary_sheet.append(("Покрытие 6–12 мес, SKU", inventory_summary(facts)["Покрытие 6–12 мес"]))
+    summary_sheet.append((UNCONFIRMED_ORDERS_LABEL, facts.unconfirmed_order_lines))
+    summary_sheet.column_dimensions["A"].width = 60
 
     for row in sorted(facts.recommendations, key=lambda row: (row.category, row.supplier_id, row.sku_id)):
         season = row.seasonal_order
@@ -250,6 +296,7 @@ def _append_inventory_sheets(workbook: Workbook, facts: PlanFacts, labels: Mappi
             "Рассмотреть ускоренную доставку" if season.expedite else None,
             round(season.order_qty), row.order_multiple,
             round(season.stock_at_arrival), round(season.target_stock), round(season.safety_stock),
+            "Да" if season_order_soon(row, facts.as_of) else "Нет",
         ))
         seasonal.cell(seasonal.max_row, 9).number_format = "0.0"
         seasonal.cell(seasonal.max_row, 4).data_type = "s"
@@ -258,16 +305,18 @@ def _append_inventory_sheets(workbook: Workbook, facts: PlanFacts, labels: Mappi
         excess.append((
             row.sku_id, labels.get(row.sku_id) or None, row.supplier_id, row.category,
             round(row.stock_at_calculation), round(row.in_transit),
+            open_orders_text(row, facts.as_of) if row.open_orders else None,
             _coverage_cell(row),
             row.price_decile, round(row.excess_threshold) if row.excess_threshold is not None else None,
             OrderFlag.RESCHEDULE if OrderFlag.RESCHEDULE in row.order_flags else None,
         ))
-        excess.cell(excess.max_row, 7).number_format = "0.0"
+        excess.cell(excess.max_row, 8).number_format = "0.0"
 
     for row in stockout_rows(facts):
         risks.append((
             row.sku_id, labels.get(row.sku_id) or None, row.supplier_id,
             round(row.stock_at_calculation), round(row.in_transit),
+            open_orders_text(row, facts.as_of) if row.open_orders else None,
             row.stock_until.isoformat() if row.stock_until else None,
             row.arrival_date.isoformat() if row.arrival_date else None,
             row.stockout_days, round(row.lost_sales),
@@ -289,7 +338,7 @@ def _append_backtest(sheet: Worksheet, facts: PlanFacts) -> None:
     result = facts.backtest
     if result is None:
         return
-    sheet.append(("Дата среза бэктеста", result.cutoff.isoformat()))
+    sheet.append(("Данные бэктеста на", result.cutoff.isoformat()))
     sheet.append(("Точки с оценёнными окнами", ", ".join(f"{origin:%Y-%m}" for origin in result.origins)))
     sheet.append(METRIC_HEADERS)
     for row in result.metrics:

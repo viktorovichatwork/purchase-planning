@@ -2,9 +2,10 @@
 
 from enum import StrEnum
 
-from purchase_planning.demand import DEMAND_WINDOW_MONTHS, LONG_STOCKOUT_MONTHS
+from purchase_planning.demand import LONG_STOCKOUT_SHARE
 from purchase_planning.facts import NO_SUPPLIER_FLAG, TYPICAL_TIMING_FLAG, Recommendation, Segment, SeasonStatus
-from purchase_planning.segments import PURCHASE_MARKUP_PCT, RECOVERY_MARKUP_PCT, REVIEW_MARKUP_PCT, ReviewReason
+from purchase_planning import segments
+from purchase_planning.segments import ReviewReason
 
 
 class Action(StrEnum):
@@ -13,10 +14,19 @@ class Action(StrEnum):
     SKIP = "Не заказывать"
 
 
+class SkipReason(StrEnum):
+    """Why a SKU is not ordered: three separate lists for the buyer."""
+
+    PRICE = "Пересмотреть цену"
+    COST = "Проставить себестоимость"
+    NO_SALES = "Год без продаж"
+
+
 ACTION_HINTS = {
     Action.ORDER: "Система посчитала количество и дату. Заказ можно размещать у поставщика.",
     Action.DECIDE: "Количество посчитано, но нужно решение закупщика. У каждого товара указано, почему и что сделать.",
-    Action.SKIP: "Система не заказывает: товар не продаётся или его цена требует пересмотра. Причина и шаг — в XLSX.",
+    Action.SKIP: "Система не заказывает: наценка ниже порога, себестоимость не проставлена или год не было продаж. "
+                 "Три списка с причиной и шагом — во вкладке «Не заказывать».",
 }
 
 _ACTIONS = {
@@ -30,6 +40,22 @@ _ACTIONS = {
 
 def action(row: Recommendation) -> Action:
     return _ACTIONS[row.segment]
+
+
+def segment_action(segment: str | None) -> Action | None:
+    return _ACTIONS[Segment(segment)] if segment is not None else None
+
+
+def low_markup(row: Recommendation) -> bool:
+    return row.markup_pct_12m is not None and row.markup_pct_12m < segments.PURCHASE_MARKUP_PCT
+
+
+def skip_reason(row: Recommendation) -> SkipReason | None:
+    if action(row) != Action.SKIP:
+        return None
+    if row.segment in {Segment.DEAD, Segment.SLEEPING}:
+        return SkipReason.NO_SALES
+    return SkipReason.PRICE if low_markup(row) else SkipReason.COST
 
 
 def _markup(row: Recommendation) -> str:
@@ -47,15 +73,10 @@ def decision_points(row: Recommendation) -> tuple[tuple[str, str], ...]:
     elif row.segment == Segment.REVIEW:
         if ReviewReason.MISSING_COST in flags:
             points.append(("Себестоимость не проставлена для большинства продаж", "Проставить себестоимость в ERP"))
-        elif ReviewReason.LOW_MARKUP in flags:
+        if low_markup(row):
             points.append((
-                f"Наценка {_markup(row)} — ниже {REVIEW_MARKUP_PCT}%", "Поднять цену или вывести из ассортимента",
-            ))
-        else:
-            current = f" ({_markup(row)})" if row.markup_pct_12m is not None else ""
-            points.append((
-                f"Наценка{current} ещё не вернулась к {RECOVERY_MARKUP_PCT}% после пересмотра",
-                f"Поднять цену до {RECOVERY_MARKUP_PCT}% или вывести из ассортимента",
+                f"Наценка {_markup(row)} — ниже {segments.PURCHASE_MARKUP_PCT}%",
+                f"Поднять цену до наценки {segments.PURCHASE_MARKUP_PCT}% или вывести из ассортимента",
             ))
     elif row.segment == Segment.CONDITIONAL:
         typical = next((flag for flag in row.sku_flags if flag.startswith(TYPICAL_TIMING_FLAG)), None)
@@ -66,21 +87,17 @@ def decision_points(row: Recommendation) -> tuple[tuple[str, str], ...]:
                 f"{missing}. Количество посчитано по типичному сроку поставки {lead}",
                 "Назначить поставщика и проверить количество",
             ))
-        if row.excluded_stockout_months >= LONG_STOCKOUT_MONTHS:
+        checked, missing = row.checked_stock_months, row.missing_stock_months
+        if checked and missing >= LONG_STOCKOUT_SHARE * checked:
+            months = "сезонных мес." if row.seasonal_category else "мес."
             points.append((
-                f"Товара не было {row.excluded_stockout_months} из {DEMAND_WINDOW_MONTHS} мес. — "
-                "прогноз по немногим месяцам",
+                f"Товара не было на складе {missing} из {checked} {months} — прогноз по немногим месяцам",
                 "Проверить, нужен ли товар и в каком количестве",
             ))
         if row.low_data:
             points.append(("Мало истории продаж — прогноз по похожим товарам", "Проверить количество"))
         if "Мало данных о наценке" in flags:
             points.append(("Наценка неизвестна", "Проверить себестоимость в ERP"))
-        if row.markup_pct_12m is not None and row.markup_pct_12m < PURCHASE_MARKUP_PCT:
-            points.append((
-                f"Наценка {_markup(row)} — ниже {PURCHASE_MARKUP_PCT}%",
-                "Согласовать цену или принять низкую наценку",
-            ))
         season = row.seasonal_order
         if season is not None and season.status == SeasonStatus.LATE:
             points.append((

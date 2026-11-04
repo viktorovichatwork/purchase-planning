@@ -4,6 +4,7 @@ from enum import StrEnum
 from math import ceil
 from typing import NotRequired, TypedDict
 
+from purchase_planning.actions import segment_action
 from purchase_planning.segments import Sale
 from purchase_planning.supply import PurchaseLine, Receipt
 
@@ -66,7 +67,8 @@ def count_changes(changes: list[Change]) -> ChangeCounts:
     return ChangeCounts(
         increased=sum(old < new for old, new in (row["order_qty"] for row in changes)),
         decreased=sum(old > new for old, new in (row["order_qty"] for row in changes)),
-        segments=sum(old != new for old, new in (row["segment"] for row in changes)),
+        # The buyer sees action groups, so a move between two «don't order» segments is not a change.
+        segments=sum(segment_action(old) != segment_action(new) for old, new in (row["segment"] for row in changes)),
         new_risks=sum(not old and new for old, new in (row["stockout_risk"] for row in changes)),
         resolved_risks=sum(old and not new for old, new in (row["stockout_risk"] for row in changes)),
         unconfirmed=sum(bool(row["flags"]) for row in changes),
@@ -152,7 +154,7 @@ def summarize(previous: str | None, changes: list[Change]) -> str:
         f"{label} — {counts.by_driver[code]}" for code, label in DRIVER_LABELS.items() if counts.by_driver[code]
     )
     return (
-        f"К заказу изменилось у {counts.quantities} SKU, сегмент — у {counts.segments}. "
+        f"К заказу изменилось у {counts.quantities} SKU, группа («Заказать», «Решить закупщику», «Не заказывать») — у {counts.segments}. "
         f"Новые риски — {counts.new_risks}, ушедшие — {counts.resolved_risks}.\n"
         f"Наблюдаемые причины — {causes or 'нет'}. Без подтверждённой причины — {counts.unconfirmed}."
     )

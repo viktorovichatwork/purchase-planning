@@ -11,7 +11,7 @@ from purchase_planning.report import write_report
     ("run_date", "status"),
     [
         (date(2026, 9, 17), None),
-        (date(2026, 9, 18), "Устаревшая выгрузка — черновик, не размещать"),
+        (date(2026, 9, 18), "Устаревшие данные. Перед заказом загрузите свежую выгрузку ERP."),
     ],
 )
 def test_order_sheet_uses_facts_and_marks_stale_exports(tmp_path, run_date, status):
@@ -58,5 +58,10 @@ def test_order_sheet_prioritizes_due_suppliers_and_sums_rounded_lines(tmp_path):
         ]
         assert rows[0][header.index("Флаги поставщика")] == timing.flags[0]
         assert facts.recommendations[2].order_qty == 5.1
+        for name in ("Заказ по поставщикам", "Решить закупщику", "Не заказывать"):
+            target = workbook[name]
+            for label in ("Наценка за 12 мес, %", "Продажи за 12 мес, шт."):
+                cell = next(cell for cells in target for cell in cells if cell.value == label)
+                assert "12 полных месяцев плюс текущий неполный месяц" in cell.comment.text
     finally:
         workbook.close()

@@ -16,8 +16,9 @@ SEASON_WINDOW_SHARE = 0.8
 MIN_OWN_DEMAND_MONTHS = 3
 # Demand level comes from the latest full months only: the assortment rotates fast.
 DEMAND_WINDOW_MONTHS = 12
-# A SKU missing from stock this many months of the window needs the buyer's check.
-LONG_STOCKOUT_MONTHS = 6
+# A SKU missing from stock for this share of the months it normally sells needs the buyer's check.
+# Seasonal categories count only months of the season window: an empty shelf off season is normal.
+LONG_STOCKOUT_SHARE = 0.5
 SBC_ADI_THRESHOLD = 1.32
 SBC_CV2_THRESHOLD = 0.49
 
@@ -29,6 +30,12 @@ class SkuDemand:
     low_data: bool
     eligible_months: int
     demand_type: DemandType
+    missing_stock_months: int = 0
+    checked_stock_months: int = 0
+
+    @property
+    def long_stockout(self) -> bool:
+        return self.checked_stock_months > 0 and self.missing_stock_months >= LONG_STOCKOUT_SHARE * self.checked_stock_months
 
 
 def _demand_type(quantities: list[float]) -> DemandType:
@@ -100,22 +107,33 @@ def estimate_sku_demand(
 ) -> SkuDemand:
     quantities = []
     weights = []
-    excluded_months = 0
+    excluded_months = missing_months = checked_months = 0
     for month in history_months:
         key = sku, month
-        if not is_stockout_month(stock.get(key, 0.0), gross_sales.get(key, 0.0)):
+        stockout = is_stockout_month(stock.get(key, 0.0), gross_sales.get(key, 0.0))
+        if not stockout:
             quantities.append(net_sales.get(key, 0.0))
             weights.append(profile.weight_for(month.month))
         elif first_sale is not None and month >= first_sale:
             excluded_months += 1
+        if first_sale is not None and month >= first_sale and (
+            not profile.is_seasonal or month.month in profile.season_window
+        ):
+            checked_months += 1
+            missing_months += stockout
 
     demand_type = _demand_type(quantities)
     if not quantities:
-        return SkuDemand(None, excluded_months, False, 0, demand_type)
+        return SkuDemand(None, excluded_months, False, 0, demand_type, missing_months, checked_months)
     exposure = sum(weights)
     if exposure == 0:
-        return SkuDemand(mean(quantities) * MONTHS_PER_YEAR, excluded_months, True, len(quantities), demand_type)
-    return SkuDemand(sum(quantities) / exposure, excluded_months, False, len(quantities), demand_type)
+        return SkuDemand(
+            mean(quantities) * MONTHS_PER_YEAR, excluded_months, True, len(quantities), demand_type,
+            missing_months, checked_months,
+        )
+    return SkuDemand(
+        sum(quantities) / exposure, excluded_months, False, len(quantities), demand_type, missing_months, checked_months,
+    )
 
 
 def apply_analog_levels(

@@ -100,7 +100,7 @@ def _row_clauses(row: Recommendation, profile: CategoryProfile | None, lead_days
             f"Прогноз на горизонт — {fsum(row.monthly_forecast):.0f} шт., "
             f"годовая оценка спроса — {row.annual_demand_qty:.0f} шт."
         )
-        supply = f"Остаток на дату среза — {row.stock_at_calculation:.0f} шт., в пути — {row.in_transit:.0f} шт."
+        supply = f"Остаток на складе — {row.stock_at_calculation:.0f} шт., в пути — {row.in_transit:.0f} шт."
         clauses["supply"] = f"{supply} Плечо — {days_text(lead_days)}." if lead_days is not None else supply
     if profile and profile.is_seasonal:
         share = f"{fsum(profile.weight_for(month) for month in profile.season_window) * 100:.1f}".replace(".", ",")
@@ -127,7 +127,7 @@ def _summary_clauses(changes: list[Change]) -> dict[str, str]:
     fields = {
         "increased": ("Количество к заказу выросло у", counts.increased),
         "decreased": ("Количество к заказу снизилось у", counts.decreased),
-        "segment": ("Сегмент изменился у", counts.segments),
+        "segment": ("Группа действия изменилась у", counts.segments),
         "new_risk": ("Новый риск дефицита у", counts.new_risks),
         "resolved_risk": ("Риск дефицита ушёл у", counts.resolved_risks),
         "unconfirmed": ("Причина изменения не подтверждена у", counts.unconfirmed),

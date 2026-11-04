@@ -27,6 +27,6 @@ def load_sku_labels(data_dir: str | Path) -> dict[str, str]:
                 decile = float(row["price_decile"])
             except ValueError:
                 decile = None
-            price = f"цена {int(decile)}/10" if decile in range(1, 11) else ""
+            price = f"ценовая группа {int(decile)} из 10" if decile in range(1, 11) else ""
             labels[row["sku_id"]] = " · ".join(part for part in (category, brand, price) if part)
     return labels

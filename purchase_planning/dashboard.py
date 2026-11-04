@@ -3,22 +3,29 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from datetime import date, timedelta
 from html import escape
-from math import fsum
 from pathlib import Path
 
-from purchase_planning.actions import ACTION_HINTS, Action, action, decision_points, todo_text, why_text
+from purchase_planning import segments
+from purchase_planning.actions import (
+    ACTION_HINTS, Action, SkipReason, action, decision_points, skip_reason, todo_text, why_text,
+)
 from purchase_planning.comparison import Change, summarize
 from purchase_planning.explanations import Explanations
 from purchase_planning.export import REQUIRED_COLUMNS
-from purchase_planning.facts import OrderFlag, PlanFacts, Recommendation, Segment
+from purchase_planning.facts import OrderFlag, PlanFacts, Recommendation, SeasonStatus
+from purchase_planning.methodology import methodology_html
 from purchase_planning.order_sheet import (
-    coverage_text, displayed_order_qty, excess_rows, order_date_label, rounded_quantity, stock_below_reorder_point,
+    coverage_text, displayed_order_qty, excess_rows, open_orders_text, order_date_label, rounded_quantity, stock_below_reorder_point,
     stockout_rows, supplier_orders,
 )
 from purchase_planning.parameters import STALE_EXPORT_DAYS, STALE_EXPORT_STATUS
 from purchase_planning.replenishment import inventory_summary
 from purchase_planning.sku_labels import category_name
-from purchase_planning.wording import days_text
+from purchase_planning.summary import (
+    ORDER_SOON_DAYS, SEASON_SOON_DAYS, PlanSummary, Tile, order_batches, plan_summary, season_deadline,
+    season_order_soon, summary_tiles,
+)
+from purchase_planning.wording import days_text, plural
 
 
 _REPOSITORY_URL = "https://github.com/viktorovichatwork/purchase-planning"
@@ -29,13 +36,38 @@ _INVENTORY_HINTS = {
     "Риски дефицита": "По прогнозу товар закончится раньше, чем придёт новый заказ, "
                       "если разместить его на дату расчёта.",
 }
+_COLUMN_HINTS = {
+    "Остаток, шт.": "Сколько лежит на складе на дату данных.",
+    "В пути, шт.": "Заказано у поставщика, плановая дата прихода в ERP ещё не наступила — сколько бы ни шла доставка.",
+    "Заказы у поставщика": "Все открытые заказы по товару: сколько штук и когда придут. Если плановая дата прихода "
+                           "уже прошла, а товар не пришёл, показано, на сколько дней заказ опаздывает. Такой заказ в "
+                           "расчёт не берётся, поэтому система может предложить заказать товар снова.",
+    "Покрытие, мес": "На сколько месяцев продаж хватит остатка и товара в пути по прогнозу.",
+    "Ценовая группа": "Насколько дорогой товар внутри своей категории: 1 — самые дешёвые 10%, 10 — самые дорогие. "
+                      "Чем выше группа, тем больше денег заморожено в избытке, поэтому такие товары стоят выше в списке.",
+    "Порог избытка, шт.": "Сколько товара системе достаточно иметь. Берётся наибольшее из трёх: продажи на 12 месяцев; "
+                          "для сезонных — продажи до конца ближайшего сезона; запас до прихода следующего заказа плюс партия. "
+                          "Всё, что на складе и в пути сверх порога, — избыток.",
+    "Открытый заказ": "«Перенести/отменить» — по товару уже есть избыток, а у поставщика ещё открыт заказ. "
+                      "Его стоит перенести или отменить, если поставщик позволит.",
+    "Упущенные продажи, шт.": "Сколько продаж не случится, пока товара нет, даже если заказать сегодня.",
+    "Дней без товара": "Сколько дней товара не будет на складе до прихода заказа, размещённого сегодня.",
+    "Хватит до": "День, когда по прогнозу закончится остаток вместе с товаром в пути.",
+    "Приход при заказе сегодня": "Когда придёт заказ, если разместить его сегодня: сегодня плюс срок поставки поставщика.",
+    "К заказу, шт.": "Количество, посчитанное системой, с округлением до обычной кратности заказа.",
+    "Наценка за 12 мес, %": "Средняя наценка к себестоимости за 12 полных месяцев и текущий неполный, взвешенная по "
+                            "проданным штукам. Так же её считает ERP в справочнике товаров. Пусто — себестоимость "
+                            "не проставлена ни для одной продажи.",
+    "Продано за 12 мес, шт.": "Сколько штук продано за 12 полных месяцев и текущий неполный месяц.",
+}
 _FLAG_HINTS = {
-    OrderFlag.STUCK: "Заказ давно просрочен, существенная часть не пришла. "
-                     "Уточните у поставщика, будет ли поставка. Пока её не учитывают в пути.",
+    OrderFlag.STUCK: "Плановая дата прихода прошла, а товар не пришёл. Заказ в расчёт не берётся. "
+                     "Если поставка всё же будет, обновите дату прихода в ERP — со следующей выгрузкой она снова "
+                     "войдёт в «В пути».",
     OrderFlag.UNCONFIRMED: "В ERP у открытого заказа не заполнено подтверждённое количество. "
                            "Часто товар по таким заказам уже приходит: поле просто не заполняют. "
                            "Строки учитываются в пути по общим правилам.",
-    OrderFlag.TAIL: "Основная часть давно просроченного заказа пришла. "
+    OrderFlag.TAIL: "Плановая дата прихода прошла, основная часть заказа пришла. "
                     "Небольшой остаток не учитывают в пути. Проверьте, можно ли закрыть заказ.",
     OrderFlag.RESCHEDULE: "По SKU есть избыток и открытый заказ. "
                           "Согласуйте с поставщиком перенос или отмену, если это возможно.",
@@ -108,7 +140,16 @@ function setupList(list) {
     return filter;
 }
 
-for (const list of document.querySelectorAll("[data-view] > [data-browse]")) setupList(list);
+// Every list that is not inside another list; nested lists are set up by their parent.
+for (const list of document.querySelectorAll("[data-browse]")) {
+    if (!list.parentElement.closest("[data-browse]")) setupList(list);
+}
+
+// One explanation for every SKU caption, set here instead of repeating it in the HTML of each row.
+for (const label of document.querySelectorAll(".sku-label")) {
+    label.title = "Категория · обезличенный бренд · ценовая группа внутри категории: "
+        + "1 из 10 — самые дешёвые 10% товаров категории, 10 из 10 — самые дорогие 10%.";
+}
 
 for (const hint of document.querySelectorAll(".hint")) {
     const trigger = hint.querySelector("button");
@@ -171,7 +212,6 @@ class Batch:
     quantity: int
     seasonal: bool
     low_stock: bool
-    conditional: bool
 
 
 @dataclass(frozen=True)
@@ -194,18 +234,8 @@ def _supplier_schedules(facts: PlanFacts) -> list[SupplierSchedule]:
         batches = []
         for row in lines:
             low_stock = stock_below_reorder_point(row)
-            conditional = row.segment == Segment.CONDITIONAL
-            season = row.seasonal_order
-            seasonal_qty = 0
-            if season and season.actionable:
-                seasonal_qty = rounded_quantity(season.order_qty, row.order_multiple)
-                batches.append(Batch(season.deadline, seasonal_qty, True, low_stock, conditional))
-            ordinary_qty = displayed_order_qty(row) - seasonal_qty
-            if ordinary_qty > 0:
-                placement = row.order_by if row.grouped_season_deadline else row.regular_order_date
-                if row.regular_order_qty is None:
-                    placement = placement or row.order_by or (summary.next_order_date if summary else None)
-                batches.append(Batch(placement or facts.as_of, ordinary_qty, False, low_stock, conditional))
+            for batch in order_batches(row, summary.next_order_date if summary else None, facts.as_of):
+                batches.append(Batch(batch.deadline, batch.quantity, batch.seasonal, low_stock))
         schedules.append(SupplierSchedule(supplier, lines, batches, summary.timing.flags if summary else ()))
     return sorted(schedules, key=lambda row: (row.deadline, row.supplier_id))
 
@@ -259,8 +289,17 @@ def _table(
     body = "".join(render_row(row) for row in rows)
     if not body:
         return "<p>Нет позиций.</p>"
-    heading = "".join(f'<th scope="col">{header}</th>' for header in headers)
-    table = (
+    heading = "".join(
+        f'<th scope="col" class="has-hint" title="{escape(_COLUMN_HINTS[header], quote=True)}">{header}</th>'
+        if header in _COLUMN_HINTS else f'<th scope="col">{header}</th>'
+        for header in headers
+    )
+    legend = "".join(
+        f"<dt>{escape(header)}</dt><dd>{escape(_COLUMN_HINTS[header])}</dd>" for header in headers if header in _COLUMN_HINTS
+    )
+    # Hover shows the native tooltip. On touch screens the same text is under «Что значат столбцы».
+    columns = f'<details class="columns"><summary>Что значат столбцы</summary><dl>{legend}</dl></details>' if legend else ""
+    table = columns + (
         f'<div class="table-scroll" role="region" aria-label="{label}" tabindex="0">'
         f'<table><thead><tr>{heading}</tr></thead><tbody data-entries="">{body}</tbody></table></div>'
     )
@@ -275,6 +314,7 @@ def _sku(
         ("К заказу, шт.", displayed_order_qty(row)),
         ("Остаток, шт.", round(row.stock_at_calculation)),
         ("В пути, шт.", round(row.in_transit)),
+        ("Заказы у поставщика", open_orders_text(row, facts.as_of)),
         ("Хватит до", _date(row.stock_until) if row.stock_until else (
             "Дольше горизонта" if row.coverage_months is not None else "Нет прогноза"
         )),
@@ -301,14 +341,34 @@ def _sku(
     )
 
 
+def _order_intro(summary: PlanSummary) -> str:
+    return (
+        f'<p class="meta">В группе «{Action.ORDER}» {_number(summary.order_total)} SKU: '
+        f"пора заказывать — {_number(summary.order_now)} SKU ({_number(summary.order_now_units)} шт. "
+        f"у {_number(summary.order_now_suppliers)} "
+        f"{plural(summary.order_now_suppliers, 'поставщика', 'поставщиков', 'поставщиков')}), "
+        f"в ближайшие {days_text(ORDER_SOON_DAYS)} — "
+        f"{_number(summary.order_soon)}, позже — {_number(summary.order_later)}. Ещё "
+        f"{_number(summary.order_not_needed)} SKU заказывать не нужно: остатка и заказанного хватает, "
+        f"в списке их нет. Товары, по которым нужно решение, стоят у поставщика отдельным блоком "
+        f"«{Action.DECIDE}». Срок заказа «Сейчас» — у {_number(summary.due_suppliers)} "
+        f"{plural(summary.due_suppliers, 'поставщика', 'поставщиков', 'поставщиков')}: у остальных "
+        f"{_number(summary.due_suppliers - summary.order_now_suppliers)} к заказу сейчас только товары "
+        f"«{Action.DECIDE}».</p>"
+    )
+
+
 def _order_table(
     facts: PlanFacts, schedules: list[SupplierSchedule], explanations: dict[str, str], labels: Mapping[str, str],
+    summary: PlanSummary,
 ) -> str:
     rows = []
     for schedule in schedules:
         as_of = facts.as_of
         low_stock = any(batch.deadline <= as_of and batch.low_stock for batch in schedule.batches)
         when = order_date_label(schedule.deadline, as_of, date_format="%d.%m.%Y", below_reorder_point=low_stock)
+        if not schedule.supplier_id:
+            when = "после того, как закупщик назначит поставщика"
         name = escape(schedule.supplier_id or "Поставщик не указан")
         batch_lines = []
         quantities = Counter()
@@ -337,95 +397,77 @@ def _order_table(
             f'{"".join(batch_lines)}</summary>{entries}</details>'
         )
     if not rows:
-        return "<p>Нет позиций с положительным количеством к заказу.</p>"
+        return _order_intro(summary) + "<p>Нет позиций с положительным количеством к заказу.</p>"
     entries = f'<div data-entries="">{"".join(rows)}</div>'
-    return '<p class="meta">Раскройте поставщика, чтобы увидеть позиции и сроки.</p>' + _browse(
+    return _order_intro(summary) + '<p class="meta">Раскройте поставщика, чтобы увидеть позиции и сроки.</p>' + _browse(
         entries, "Поиск по поставщику, SKU, категории или бренду",
     )
 
 
+def _number(value: int) -> str:
+    return format(value, ",").replace(",", " ")
+
+
 def _decision(
-    facts: PlanFacts, schedules: list[SupplierSchedule], previous_run: str | None, changes: list[Change],
+    facts: PlanFacts, summary: PlanSummary, previous_run: str | None, changes: list[Change],
     explanation: str, *, stale: bool,
 ) -> str:
-    as_of = facts.as_of
-    due = sum(schedule.deadline <= as_of for schedule in schedules)
-    soon = sum(
-        any(as_of < batch.deadline <= as_of + timedelta(days=30) for batch in schedule.batches)
-        for schedule in schedules
-    )
-    batches = [batch for schedule in schedules for batch in schedule.batches]
-    due_batches = [batch for batch in batches if batch.deadline <= as_of]
-    units_now = sum(batch.quantity for batch in due_batches if not batch.conditional)
-    units_to_confirm = sum(batch.quantity for batch in due_batches if batch.conditional)
-    seasonal_units = sum(
-        batch.quantity for batch in batches if batch.seasonal and as_of <= batch.deadline <= as_of + timedelta(days=90)
-    )
-    excess = excess_rows(facts)
-    volume = round(fsum(max(0, row.stock_at_calculation + row.in_transit - (row.excess_threshold or 0)) for row in excess))
-    metrics = (
-        ("Поставщиков пора заказывать", due, "#orders"),
-        ("Рекомендация на дату среза, шт." if stale else "К заказу сейчас, шт.", units_now, ""),
-        (f"{Action.DECIDE}, шт.", units_to_confirm, "#decide"),
-        ("SKU в риске дефицита", len(stockout_rows(facts)), "#risks"),
-    )
-    additional = (
-        ("Поставщиков в следующие 30 дней", soon, ""),
-        ("Сезонные партии с крайним сроком в ближайшие 90 дней, шт.", seasonal_units, ""),
-        ("Избыток, шт. сверх порога", volume, ""),
-    )
-
-    def metrics_list(values: tuple[tuple[str, int, str], ...]) -> str:
+    def metrics_list(tiles: Iterable[Tile]) -> str:
         items = []
-        for label, value, href in values:
-            number = format(value, ",").replace(",", " ")
-            if href:
-                number = f'<a href="{href}" data-view-link="" aria-label="{label} — {number}">{number}</a>'
-            items.append(f"<div><dt>{label}</dt><dd>{number}</dd></div>")
+        for tile in tiles:
+            label = tile.label
+            if stale and tile.view == "orders" and tile.main:
+                label = label.replace(", SKU", f" по данным на {facts.cutoff:%d.%m.%Y}, SKU")
+            number = _number(tile.count)
+            link = f'<a href="#{tile.view}" data-view-link="" aria-label="{escape(label)} — {number}">{number}</a>'
+            items.append(f"<div><dt>{escape(label)}</dt><dd>{link}</dd></div>")
         return f'<dl class="decision">{"".join(items)}</dl>'
 
+    tiles = summary_tiles(summary)
     comparison = escape(" ".join(summarize(previous_run, changes).splitlines()))
     llm = f"<p><strong>Пояснение LLM</strong> · {escape(explanation)}</p>" if explanation else ""
     return (
-        f'{metrics_list(metrics)}<p>{comparison}</p>{llm}'
-        f'<details class="more-metrics"><summary>Другие показатели</summary>{metrics_list(additional)}</details>'
+        f'{metrics_list(tile for tile in tiles if tile.main)}'
+        '<p class="meta">Все показатели — в SKU. Нажмите на число, чтобы открыть вкладку с этими товарами.</p>'
+        f'<p>{comparison}</p>{llm}'
+        '<details class="more-metrics"><summary>Другие показатели</summary>'
+        f'{metrics_list(tile for tile in tiles if not tile.main)}</details>'
     )
 
 
 def _risks(facts: PlanFacts, labels: Mapping[str, str]) -> str:
-    risks = stockout_rows(facts)
-    visible = [row for row in risks if row.lost_sales >= 1]
-    hidden = len(risks) - len(visible)
     return _table(
         "Риски дефицита",
         ("SKU", "Упущенные продажи, шт.", "Дней без товара", "Поставщик", "Хватит до",
-         "Приход при заказе сегодня", "Остаток, шт.", "В пути, шт."),
-        ((row.sku_id, round(row.lost_sales), row.stockout_days, row.supplier_id, _date(row.stock_until),
-          _date(row.arrival_date), round(row.stock_at_calculation), round(row.in_transit))
-         for row in visible),
+         "Приход при заказе сегодня", "Остаток, шт.", "В пути, шт.", "Заказы у поставщика"),
+        ((row.sku_id, round(row.lost_sales) or "меньше 1", row.stockout_days,
+          row.supplier_id, _date(row.stock_until), _date(row.arrival_date), round(row.stock_at_calculation),
+          round(row.in_transit), open_orders_text(row, facts.as_of))
+         for row in stockout_rows(facts)),
         sku_labels=labels, supplier_column=3,
-    ) + (f'<p class="meta">В XLSX есть ещё {hidden} SKU с оценкой потерь менее 1 шт.</p>' if hidden else "")
+    )
 
 
 def _excess(facts: PlanFacts, labels: Mapping[str, str]) -> str:
     return _table(
         "Избыток",
-        ("SKU", "Поставщик", "Остаток, шт.", "В пути, шт.", "Покрытие, мес", "Дециль цены", "Порог, шт.", "Флаг"),
+        ("SKU", "Поставщик", "Остаток, шт.", "В пути, шт.", "Заказы у поставщика", "Покрытие, мес", "Ценовая группа",
+         "Порог избытка, шт.", "Открытый заказ"),
         ((row.sku_id, row.supplier_id, round(row.stock_at_calculation), round(row.in_transit),
+          open_orders_text(row, facts.as_of),
           coverage_text(row), row.price_decile if row.price_decile is not None else "—",
           round(row.excess_threshold) if row.excess_threshold is not None else "—",
-          OrderFlag.RESCHEDULE if OrderFlag.RESCHEDULE in row.order_flags else "—")
+          "Перенести/отменить" if OrderFlag.RESCHEDULE in row.order_flags else "—")
          for row in excess_rows(facts)),
         sku_labels=labels,
     )
 
 
-def _seasons(facts: PlanFacts, labels: Mapping[str, str]) -> str:
-    groups: dict[tuple[date, str, str], list[str]] = defaultdict(list)
+def _seasons(facts: PlanFacts, labels: Mapping[str, str], summary: PlanSummary) -> str:
+    groups: dict[tuple[date, str, str], list[Recommendation]] = defaultdict(list)
     for row in facts.recommendations:
-        if season := row.seasonal_order:
-            deadline = season.deadline if season.deadline >= facts.as_of else season.next_deadline
-            groups[deadline, row.supplier_id, row.category].append(row.sku_id)
+        if deadline := season_deadline(row, facts.as_of):
+            groups[deadline, row.supplier_id, row.category].append(row)
     if not groups:
         return "<p>Нет позиций.</p>"
     sections = []
@@ -433,24 +475,64 @@ def _seasons(facts: PlanFacts, labels: Mapping[str, str]) -> str:
         heading = " · ".join(escape(part) for part in (
             _date(deadline), supplier or "Поставщик не указан", category_name(category), f"{len(skus)} SKU",
         ) if part)
-        items = "".join(
-            f'<li data-search="{_search_key(sku, labels.get(sku, ""))}">{escape(sku)}{_sku_caption(sku, labels)}</li>'
-            for sku in sorted(skus)
-        )
-        entries = _browse(f'<ul class="skus season-skus" data-entries="">{items}</ul>')
+        items = []
+        for row in sorted(skus, key=lambda row: row.sku_id):
+            season = row.seasonal_order
+            soon = season_order_soon(row, facts.as_of)
+            if season and season.actionable:
+                status = f"Сезонная партия — {rounded_quantity(season.order_qty, row.order_multiple)} шт."
+                if soon:
+                    status += f" · заказать в ближайшие {days_text(SEASON_SOON_DAYS)}"
+                elif season.deadline < facts.as_of:
+                    status += " · срок прошёл, решить закупщику"
+            else:
+                status = (
+                    "Сезонный заказ не нужен: остатка и заказанного хватает"
+                    if season and season.status == SeasonStatus.ON_TIME and season.order_qty <= 0
+                    else str(season.status) if season else "Нет сезонного заказа"
+                )
+            items.append(
+                f'<li data-season-soon="{str(soon).lower()}" data-search="{_search_key(row.sku_id, labels.get(row.sku_id, ""))}">'
+                f'{escape(row.sku_id)}{_sku_caption(row.sku_id, labels)}<span class="batch">{escape(status)}</span></li>'
+            )
+        entries = _browse(f'<ul class="skus season-skus" data-entries="">{"".join(items)}</ul>')
         search = _search_key(supplier, category_name(category))
         sections.append(f'<details data-search="{search}"><summary>{heading}</summary>{entries}</details>')
-    return '<p class="meta">Раскройте группу, чтобы увидеть SKU.</p>' + _browse(
+    seasonal = sorted(
+        (profile for profile in facts.category_profiles if profile.is_seasonal), key=lambda profile: profile.season_window,
+    )
+    windows = "; ".join(
+        f"{category_name(profile.category).lower()} — {_MONTHS[profile.season_window[0] - 1]}–"
+        f"{_MONTHS[profile.season_window[-1] - 1]}"
+        for profile in seasonal
+    )
+    intro = (
+        '<p class="meta">Сезонная категория — та, у которой за три лучших месяца подряд продаётся больше половины '
+        f"годового объёма. Сейчас это: {escape(windows)}. Остальные категории продаются ровнее и заказываются обычным циклом.</p>"
+        '<p class="meta">Под сезон заказ размещается один раз, заранее: крайний срок = начало сезона минус срок поставки '
+        "поставщика. У разных поставщиков срок поставки разный, поэтому одна категория может стоять в нескольких группах — "
+        "одна группа = один заказ одному поставщику. Если срок этого сезона уже прошёл, показан срок на следующий год. "
+        "Раскройте группу, чтобы увидеть товары.</p>"
+        f'<p class="meta">Всего в списке {_number(sum(map(len, groups.values())))} SKU. Нужен сезонный заказ в ближайшие '
+        f"{days_text(SEASON_SOON_DAYS)}, до {_date(facts.as_of + timedelta(days=SEASON_SOON_DAYS))}, — у "
+        f"{_number(summary.season_soon)} SKU. Эти товары отмечены в списке; товары без сезонной партии в показатель не входят.</p>"
+    )
+    return intro + _browse(
         f'<div data-entries="">{"".join(sections)}</div>', "Поиск по категории, поставщику, SKU или бренду",
     )
 
 
-def _calendar(as_of: date, schedules: list[SupplierSchedule]) -> str:
+_MONTHS = ("январь", "февраль", "март", "апрель", "май", "июнь", "июль", "август", "сентябрь", "октябрь", "ноябрь", "декабрь")
+
+
+def _calendar(facts: PlanFacts) -> str:
     labels = ("янв.", "февр.", "март", "апр.", "май", "июнь", "июль", "авг.", "сент.", "окт.", "нояб.", "дек.")
+    as_of = facts.as_of
     first = as_of.year * 12 + as_of.month - 1
+    next_dates = {supplier.supplier_id: supplier.next_order_date for supplier in facts.suppliers}
     counts: Counter[int] = Counter()
-    for schedule in schedules:
-        days = (max(as_of, batch.deadline) for batch in schedule.batches)
+    for row in facts.recommendations:
+        days = (max(as_of, batch.deadline) for batch in order_batches(row, next_dates.get(row.supplier_id), as_of))
         counts.update({day.year * 12 + day.month - 1 for day in days})
     months = [divmod(month, 12) for month in range(first, first + 6)]
     values = [counts[year * 12 + month] for year, month in months]
@@ -465,7 +547,7 @@ def _calendar(as_of: date, schedules: list[SupplierSchedule]) -> str:
         )
     return (
         '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 225 156" role="img" aria-labelledby="calendar-title">'
-        '<title id="calendar-title">Число поставщиков по месяцу крайнего срока заказа</title>'
+        '<title id="calendar-title">Число SKU по месяцу крайнего срока заказа</title>'
         + "".join(bars) + "</svg>"
     )
 
@@ -485,14 +567,60 @@ def _hint_list(prefix: str, entries: Iterable[tuple[str, str]]) -> str:
     return f'<ul class="hint-list">{items}</ul>'
 
 
-def _actions(facts: PlanFacts) -> str:
+def _actions(facts: PlanFacts, summary: PlanSummary) -> str:
     counts = Counter(action(row) for row in facts.recommendations)
-    skipped = Counter(row.segment for row in facts.recommendations if action(row) == Action.SKIP)
     groups = _hint_list("action", ((f"{group} — {counts[group]} SKU", ACTION_HINTS[group]) for group in Action))
-    details = " · ".join(
-        f"{segment} — {skipped[segment]}" for segment in (Segment.DEAD, Segment.SLEEPING, Segment.REVIEW)
+    details = " · ".join(f"{reason} — {count}" for reason, count in summary.skip.items())
+    return (
+        f'{groups}<p class="meta">{Action.SKIP}: {escape(details)}. '
+        f'Списки с причинами — во вкладке <a href="#skip" data-view-link="">«{Action.SKIP}»</a>.</p>'
     )
-    return f'{groups}<p class="meta">{Action.SKIP}: {escape(details)}. Список с причинами — в XLSX.</p>'
+
+
+_SKIP_INTROS = {
+    SkipReason.PRICE: "Наценка за последние 12 месяцев ниже {threshold}%: такой товар не заказывается автоматически. "
+                      "Поднимите цену или выведите товар из ассортимента.",
+    SkipReason.COST: "Себестоимость в ERP не проставлена для большинства продаж, поэтому наценку проверить нельзя. "
+                     "Проставьте себестоимость — со следующей выгрузкой система проверит наценку.",
+    SkipReason.NO_SALES: "За последние 12 месяцев продаж не было. Если товар есть на складе — распродайте или спишите "
+                         "остаток. Если нет — решите, возвращать ли его в ассортимент.",
+}
+
+
+def _skip(facts: PlanFacts, labels: Mapping[str, str], summary: PlanSummary) -> str:
+    lists = defaultdict(list)
+    for row in facts.recommendations:
+        if (reason := skip_reason(row)) is not None:
+            lists[reason].append(row)
+    intro = (
+        f'<p class="meta">Система эти {_number(summary.skip_total)} SKU не заказывает. Они разделены на три списка '
+        "по причине. У каждого товара написано, что сделать.</p>"
+    )
+    sections = []
+    for reason in SkipReason:
+        rows = lists[reason]
+        if reason == SkipReason.NO_SALES:
+            rows.sort(key=lambda row: (-row.stock_at_calculation, row.sku_id))
+            headers = ("SKU", "Поставщик", "Остаток, шт.", "Почему", "Что сделать")
+            values = (
+                (row.sku_id, row.supplier_id or "Поставщик не указан", round(row.stock_at_calculation),
+                 why_text(row), todo_text(row))
+                for row in rows
+            )
+        else:
+            rows.sort(key=lambda row: (-row.sales_qty_12m, row.sku_id))
+            headers = ("SKU", "Поставщик", "Наценка за 12 мес, %", "Продано за 12 мес, шт.", "Почему", "Что сделать")
+            values = (
+                (row.sku_id, row.supplier_id or "Поставщик не указан", _decimal(row.markup_pct_12m),
+                 round(row.sales_qty_12m), why_text(row), todo_text(row))
+                for row in rows
+            )
+        description = _SKIP_INTROS[reason].format(threshold=segments.PURCHASE_MARKUP_PCT)
+        sections.append(
+            f'<section class="skip-list"><h3>{reason} — {_number(len(rows))} SKU</h3>'
+            f'<p class="meta">{escape(description)}</p>{_table(reason, headers, values, sku_labels=labels)}</section>'
+        )
+    return intro + "".join(sections)
 
 
 def _decide(facts: PlanFacts, labels: Mapping[str, str]) -> str:
@@ -563,8 +691,6 @@ def write_dashboard(
     stale = age > STALE_EXPORT_DAYS
     status = STALE_EXPORT_STATUS if stale else "Актуально"
     status_class = "draft" if stale else "current"
-    cutoff_prefix = "≈ " if facts.cutoff_is_estimated else ""
-    cutoff_note = f" · {escape(facts.cutoff_source)}" if facts.cutoff_source else ""
     warnings = f"<p>{escape(facts.supply_warning)}</p>" if facts.supply_warning else ""
     inventory = _hint_list(
         "inventory",
@@ -572,19 +698,22 @@ def write_dashboard(
     )
     schedules = _supplier_schedules(facts)
     labels = sku_labels or {}
-    overview = _decision(facts, schedules, previous_run, changes, explanations.summary if explanations else "", stale=stale)
+    summary = plan_summary(facts)
+    overview = _decision(facts, summary, previous_run, changes, explanations.summary if explanations else "", stale=stale)
+    order_table = _order_table(facts, schedules, explanations.rows if explanations else {}, labels, summary)
     workspace = (
-        ("orders", "Заказ по поставщикам", _order_table(facts, schedules, explanations.rows if explanations else {}, labels)),
+        ("orders", "Заказ по поставщикам", order_table),
         ("decide", Action.DECIDE, _decide(facts, labels)),
+        ("skip", Action.SKIP, _skip(facts, labels, summary)),
         ("risks", "Риски дефицита", _risks(facts, labels)),
         ("excess", "Избыток", _excess(facts, labels)),
-        ("seasons", "Сезонные заказы", _seasons(facts, labels)),
+        ("seasons", "Сезонные заказы", _seasons(facts, labels, summary)),
     )
     diagnostics = (
-        ("calendar", "Календарь заказов на 6 месяцев", _calendar(facts.as_of, schedules)),
+        ("calendar", "Календарь заказов на 6 месяцев, SKU", _calendar(facts)),
         ("forecast-quality", "Качество прогноза", _backtest_quality(facts)),
         ("stock", "Запас", inventory),
-        ("segments", "Что делать с ассортиментом", _actions(facts)),
+        ("segments", "Что делать с ассортиментом", _actions(facts, summary)),
         ("order-flags", "Флаги открытых заказов", _order_flags(facts)),
     )
     nav = "".join(f'<a href="#{key}">{"Поставщики" if key == "orders" else title}</a>' for key, title, _ in workspace)
@@ -599,12 +728,12 @@ def write_dashboard(
     freshness = f'<div class="freshness {status_class}"><strong>{status}</strong>'
     if stale:
         freshness += (
-            '<span>Перед размещением заказа обновите данные.</span>'
+            f'<span>Данным {days_text(age)}: остатки на складе уже другие. '
+            'Перед заказом загрузите свежую выгрузку.</span>'
             '<a class="upload-action primary" href="#upload">Обновить выгрузку ERP</a>'
         )
     freshness += '</div>'
     check_orders = '<a class="primary" href="#orders" data-view-link="">Проверить заказ по поставщикам</a>'
-    download_label = "Скачать черновик XLSX" if stale else "Скачать XLSX"
     csv_files = ", ".join(f"<code>{table}.csv</code>" for table in REQUIRED_COLUMNS)
     path.write_text(
         f"""<!doctype html>
@@ -708,6 +837,16 @@ button {{ padding: 0 .75rem; cursor: pointer; }}
 button:hover {{ background: var(--subtle); }}
 button[aria-disabled="true"] {{ color: var(--muted); background: var(--subtle); cursor: default; }}
 .hint-list {{ list-style: none; padding: 0; }}
+th.has-hint {{ cursor: help; text-decoration: underline dotted; text-underline-offset: .25em; }}
+.columns {{ margin: .5rem 0; font-size: .875rem; }}
+.columns dl {{ display: grid; grid-template-columns: max-content 1fr; gap: .35rem 1rem; max-width: 75ch; }}
+.columns dt {{ font-weight: 650; }}
+.method {{ max-width: 80ch; }}
+.method h3 {{ margin-top: 1.75rem; }}
+.method blockquote {{ margin: .75rem 0; padding: .5rem 1rem; border-left: 3px solid var(--accent); background: var(--subtle); }}
+.method li + li {{ margin-top: .3rem; }}
+.columns dd {{ margin: 0; }}
+@media (max-width: 40rem) {{ .columns dl {{ grid-template-columns: 1fr; }} .columns dd {{ margin-bottom: .4rem; }} }}
 .hint {{ position: relative; display: inline-block; max-width: 100%; }}
 .hint button {{
     padding: .35rem 0; min-height: 2rem; border: 0; background: none; text-align: left;
@@ -751,12 +890,12 @@ ul {{ margin: 0; padding-left: 1.25rem; }}
 <header>
 <div>
 <h1>План закупок</h1>
-<p class="meta">Срез {cutoff_prefix}<time datetime="{facts.cutoff.isoformat()}">{facts.cutoff:%d.%m.%Y}</time>{cutoff_note} · {days_text(age)} на дату запуска</p>
+<p class="meta">Остатки и продажи из ERP на <time datetime="{facts.cutoff.isoformat()}">{facts.cutoff:%d.%m.%Y}</time> · пересчитано <time datetime="{run_date.isoformat()}">{run_date:%d.%m.%Y}</time></p>
 </div>
 {freshness if stale else ""}
 <nav class="actions" aria-label="Действия с отчётом">
 {check_orders if not stale else ""}
-<a href="report.xlsx" download="report.xlsx">{download_label}</a>
+<a href="report.xlsx" download="report.xlsx">Скачать XLSX</a>
 {history_link}
 {upload_link if not stale else ""}
 <a href="#guide">Как работать с порталом</a>
@@ -769,6 +908,7 @@ ul {{ margin: 0; padding-left: 1.25rem; }}
 <nav class="workspace-nav" aria-label="Рабочие разделы">
 {nav}
 <a href="#diagnostics">Аналитика</a>
+<a href="#method">Методика</a>
 </nav>
 {content}
 <section id="diagnostics" data-view="">
@@ -776,19 +916,24 @@ ul {{ margin: 0; padding-left: 1.25rem; }}
 <p class="meta">Наведите курсор на подчёркнутый показатель или выберите его, чтобы прочитать пояснение.</p>
 {diagnostic_html}
 </section>
+<section class="method" id="method" data-view="">
+<h2>Как система считает закупку</h2>
+{methodology_html()}
+</section>
 <section class="guide" id="guide" data-view="">
 <h2>Как работать с порталом</h2>
 <h3>Проверить рекомендации</h3>
 <ol>
-<li>Проверьте дату среза. Если выгрузке больше {STALE_EXPORT_DAYS} дней на дату запуска, <a href="#upload">обновите выгрузку ERP</a> перед заказом.</li>
+<li>Проверьте дату данных под заголовком. Если данным больше {STALE_EXPORT_DAYS} дней, <a href="#upload">загрузите свежую выгрузку ERP</a> перед заказом.</li>
 <li>В разделе <a href="#orders">«Заказ по поставщикам»</a> раскройте поставщика и сверьте количество, сроки и флаги по SKU.</li>
 <li>Откройте <a href="#decide">«Решить закупщику»</a>. У каждого товара написано, почему система не заказывает его сама и что сделать. Решили заказать — добавьте позицию в заказ поставщику.</li>
+<li>Во вкладке <a href="#skip">«Не заказывать»</a> три списка: пересмотреть цену (наценка ниже {segments.PURCHASE_MARKUP_PCT}%), проставить себестоимость и год без продаж. Передайте их тем, кто отвечает за цены и ассортимент.</li>
 <li>Проверьте <a href="#risks">риски дефицита</a>, <a href="#excess">избыток</a> и <a href="#seasons">сроки сезонных заказов</a>. Скачайте XLSX для работы со списками и проверки прогноза.</li>
 </ol>
 <h3>Как система считает</h3>
-<p>Откуда берутся прогноз, страховой запас, количество и сроки, простыми словами — <a href="{_REPOSITORY_URL}/blob/main/docs/methodology.md">методика расчёта</a>.</p>
+<p>Откуда берутся прогноз, страховой запас, количество и сроки, простыми словами — вкладка <a href="#method">«Методика»</a>.</p>
 <h3>Прочитать подпись SKU</h3>
-<p>Под кодом SKU указаны категория, обезличенный бренд и ценовая группа внутри категории. «Цена 7/10» означает седьмой дециль. В XLSX эта подпись находится в колонке «Товар».</p>
+<p>Под кодом SKU указаны категория, обезличенный бренд и ценовая группа внутри категории. Все товары категории разбиты по цене на 10 равных групп: «ценовая группа 1 из 10» — самые дешёвые 10%, «10 из 10» — самые дорогие 10%. Названий товаров в выгрузке ERP нет, поэтому подпись помогает понять, что это за товар. В XLSX эта подпись — в колонке «Товар».</p>
 </section>
 <section class="guide" id="upload" data-view="">
 <h2>Обновить выгрузку ERP</h2>
@@ -803,8 +948,8 @@ ul {{ margin: 0; padding-left: 1.25rem; }}
 </li>
 <li>
 <h3>Проверьте результат</h3>
-<p>Откройте <a href="{_REPOSITORY_URL}/actions/workflows/publish.yml">страницу расчётов в GitHub Actions</a>. Когда новый запуск завершится успешно, обновите портал и сверьте дату среза.</p>
-<p>Портал оценивает дату среза по объёму продаж неполного месяца. Если данных для оценки не хватает, берётся конец последнего полного месяца. В обоих случаях срез не раньше последнего прихода и заказа.</p>
+<p>Откройте <a href="{_REPOSITORY_URL}/actions/workflows/publish.yml">страницу расчётов в GitHub Actions</a>. Когда новый запуск завершится успешно, обновите портал и сверьте дату данных под заголовком.</p>
+<p>Даты в выгрузке нет. Портал определяет её сам: сравнивает продажи последнего, неполного месяца с обычными продажами за такой месяц. Например, продана примерно половина обычного — значит, данные на середину месяца.</p>
 </li>
 </ol>
 <p><a href="#guide">Вернуться к инструкции по работе с порталом</a></p>

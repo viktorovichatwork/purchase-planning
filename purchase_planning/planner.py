@@ -1,7 +1,7 @@
 import json
 from calendar import monthrange
 from collections import defaultdict
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable
 from dataclasses import dataclass, replace
 from datetime import date, timedelta
 from math import ceil, fsum
@@ -10,7 +10,7 @@ from statistics import median
 
 from purchase_planning.calibration import read_backtest
 from purchase_planning.demand import (
-    DEMAND_WINDOW_MONTHS, LONG_STOCKOUT_MONTHS, apply_analog_levels, category_profiles, estimate_sku_demand,
+    DEMAND_WINDOW_MONTHS, apply_analog_levels, category_profiles, estimate_sku_demand,
 )
 from purchase_planning.export import ExportValidationError, finite_quantity, read_export
 from purchase_planning.facts import (
@@ -20,7 +20,7 @@ from purchase_planning.facts import (
 from purchase_planning.inventory import forecast_period, project_stock
 from purchase_planning.order_sheet import displayed_order_qty
 from purchase_planning.replenishment import InventoryPlan, SeasonalBatch, matching_seasonal_batch, plan_inventory
-from purchase_planning.segments import ASSORTMENT_MONTHS, Sale, classify_sku, month_index
+from purchase_planning.segments import Sale, classify_sku, in_assortment_window, month_index
 from purchase_planning.supply import PurchaseLine, Receipt, classify_transit, read_supply, read_supply_history
 
 STOCK_HISTORY_START = date(2024, 1, 1)
@@ -175,16 +175,12 @@ def read_monthly_history(
     return sales_rows, stock, partial_months
 
 
-def plan(
-    data_dir: str | Path, as_of: date | None = None, *,
-    previous_segments: Mapping[str, Segment] | None = None,
-) -> PlanFacts:
-    return calculate(data_dir, as_of, previous_segments=previous_segments).facts
+def plan(data_dir: str | Path, as_of: date | None = None) -> PlanFacts:
+    return calculate(data_dir, as_of).facts
 
 
 def calculate(
     data_dir: str | Path, as_of: date | None = None, *,
-    previous_segments: Mapping[str, Segment] | None = None,
     backtest_dir: Path | None = None,
 ) -> Calculation:
     directory = Path(data_dir)
@@ -245,15 +241,21 @@ def calculate(
     open_lines = [line for line in orders if line.status == "open"]
     open_skus = {line.sku for line in open_lines}
     transit, order_flags = classify_transit(open_lines, calculation_date)
+    open_orders: dict[str, list[tuple[date | None, float]]] = defaultdict(list)
+    for line in open_lines:
+        if line.pending > 0:
+            # A missing or impossible arrival date (before the order date) is shown as missing.
+            valid = line.promised is not None and line.promised >= line.placed
+            open_orders[line.sku].append((line.promised if valid else None, line.pending))
     month_receipts: dict[str, dict[date, float]] = defaultdict(lambda: defaultdict(float))
     current_month = month_index(calculation_date)
     last_complete_month = current_month - (calculation_date < stock_month or stock_month in partial_months)
+    window = {"as_of": calculation_date, "last_complete_month": last_complete_month}
     recent_stock = {
-        sku for (sku, month), quantity in stock.items()
-        if quantity > 0 and current_month - ASSORTMENT_MONTHS < month_index(month) <= current_month
+        sku for (sku, month), quantity in stock.items() if quantity > 0 and in_assortment_window(month, **window)
     }
     for receipt in receipts:
-        if month_index(receipt.received) > current_month - ASSORTMENT_MONTHS:
+        if in_assortment_window(receipt.received, **window):
             recent_stock.add(receipt.sku)
         if month_start <= receipt.received:
             month_receipts[receipt.sku][receipt.received] += receipt.qty
@@ -285,7 +287,6 @@ def calculate(
             sales_by_sku[sku], first_sales.get(sku), as_of=calculation_date,
             last_complete_month=last_complete_month, had_recent_stock=sku in recent_stock or current_stock > 0,
             low_data=demand.low_data,
-            previous_segment=previous_segments.get(sku) if previous_segments is not None else None,
         )
         segment = assortment.segment
         flags = list(assortment.flags)
@@ -305,7 +306,7 @@ def calculate(
             flags.append("Не определено плечо поставки")
         if cycle is None:
             flags.append("Нет истории для цикла")
-        if selling and demand.excluded_stockout_months >= LONG_STOCKOUT_MONTHS:
+        if selling and demand.long_stockout:
             segment = Segment.CONDITIONAL
         try:
             decile = float(sku_row["price_decile"])
@@ -319,7 +320,10 @@ def calculate(
             Recommendation(
                 sku_id=sku, supplier_id=supplier, order_qty=0.0,
                 excluded_stockout_months=demand.excluded_stockout_months, low_data=demand.low_data,
+                missing_stock_months=demand.missing_stock_months, checked_stock_months=demand.checked_stock_months,
+                seasonal_category=profile.is_seasonal,
                 stock_at_calculation=current_stock, in_transit_by_month=tuple(monthly_transit.items()),
+                open_orders=tuple(sorted(open_orders[sku], key=lambda order: (order[0] or date.min, order[1]))),
                 order_flags=tuple(sorted(order_flags.get(sku, ()))), segment=segment, is_new=assortment.is_new,
                 markup_pct_12m=assortment.markup_pct_12m, sales_qty_12m=assortment.sales_qty_12m,
                 sku_flags=tuple(flags), annual_demand_qty=annual_level, category=profile.category,
@@ -361,7 +365,8 @@ def calculate(
     suppliers = []
     for supplier, terms in timing.items():
         supplier_deadline = min(dates_by_supplier[supplier], default=None)
-        due = supplier_deadline is not None and (
+        # Nobody can place an order without a supplier: the buyer names one first.
+        due = bool(supplier) and supplier_deadline is not None and (
             supplier_deadline <= calculation_date + timedelta(days=terms.cycle_days or 0)
         )
         suppliers.append(SupplierSummary(supplier, terms, fsum(quantities_by_supplier[supplier]), due, supplier_deadline))
@@ -377,5 +382,6 @@ def calculate(
             for row, forecast in sku_plans
         ), cutoff_source, forecast_months, tuple(profiles.values()), tuple(suppliers), supply_warning, backtest,
         backtest_warning, unconfirmed_order_lines=sum(line.is_unconfirmed for line in open_lines),
+        typical_timing=typical_timing,
     )
     return Calculation(facts, sales_by_sku, receipts, orders)

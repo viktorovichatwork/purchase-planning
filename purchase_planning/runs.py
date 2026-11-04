@@ -61,7 +61,7 @@ def _validate_plan(facts: PlanFacts) -> None:
 
 def _history_page(entries: list[tuple[str, str, str]], path: Path) -> None:
     links = "".join(
-        f'<li><a href="{escape(href, quote=True)}">Запуск {escape(name)} · срез {escape(cutoff)}</a></li>'
+        f'<li><a href="{escape(href, quote=True)}">Запуск {escape(name)} · данные на {escape(cutoff)}</a></li>'
         for href, name, cutoff in entries
     )
     path.write_text(
@@ -111,7 +111,6 @@ def run_plan(
             raise ExportValidationError(["Такая выгрузка уже была обработана. Для пересчёта запустите workflow вручную."])
     old_facts = _read_json(previous / "facts.json") if previous else None
     old_rows = old_facts["recommendations"] if old_facts else []
-    previous_segments = {row["sku_id"]: Segment(row["segment"]) for row in old_rows}
 
     started_at = datetime.now(timezone.utc)
     run_date = started_at.astimezone().date()
@@ -120,7 +119,7 @@ def run_plan(
         backtest_dir = Path(temporary) if refresh_backtest else directory
         if refresh_backtest:
             _write_json(backtest_dir / BACKTEST_FILENAME, asdict(run_backtest(directory)))
-        calculation = calculate(directory, previous_segments=previous_segments, backtest_dir=backtest_dir)
+        calculation = calculate(directory, backtest_dir=backtest_dir)
     facts = calculation.facts
     _validate_plan(facts)
     sku_labels = load_sku_labels(directory)
