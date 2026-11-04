@@ -58,8 +58,8 @@ def test_dashboard_matches_workbook_and_displays_facts(tmp_path):
     guide_files = {node.text for node in upload.findall(".//code")}
     assert {name for name in guide_files if name.endswith(".csv")} == {f"{name}.csv" for name in REQUIRED_COLUMNS}
     assert "export_meta.json" not in "".join(upload.itertext())
-    assert "Черновик, не размещать" not in visible_text
-    for value in ("13.08.2026", "36 дней", "Устаревшая выгрузка", "Первый запуск",
+    assert "Устаревшая выгрузка — черновик, не размещать" in "".join(page.find(".//header").itertext())
+    for value in ("13.08.2026", "36 дней", "Первый запуск",
                   "Зависший заказ", "Хвост заказа", "Условно к закупке"):
         assert value in visible_text
 

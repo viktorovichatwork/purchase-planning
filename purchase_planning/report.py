@@ -13,7 +13,9 @@ from purchase_planning.order_sheet import (
     coverage_text, displayed_order_qty, excess_rows, order_date_label, rounded_quantity, stock_below_reorder_point,
     stockout_rows, supplier_orders,
 )
-from purchase_planning.parameters import PARAMETER_NUMBER_FORMATS, STALE_EXPORT_DAYS, llm_max_skus, run_parameters
+from purchase_planning.parameters import (
+    PARAMETER_NUMBER_FORMATS, STALE_EXPORT_DAYS, STALE_EXPORT_STATUS, llm_max_skus, run_parameters,
+)
 from purchase_planning.replenishment import inventory_summary
 from purchase_planning.sku_labels import category_name
 
@@ -50,10 +52,10 @@ def write_report(
     assert sheet is not None
     sheet.title = "Заказ по поставщикам"
     sheet.append(("Дата среза", facts.cutoff.isoformat()))
-    status = "Устаревшая выгрузка" if (run_date - facts.cutoff).days > STALE_EXPORT_DAYS else None
+    status = STALE_EXPORT_STATUS if (run_date - facts.cutoff).days > STALE_EXPORT_DAYS else None
     sheet.append(("Статус", status))
-    if facts.cutoff_warning:
-        sheet.append(("Предупреждение", facts.cutoff_warning))
+    if facts.cutoff_source:
+        sheet.append(("Как определена дата среза", facts.cutoff_source))
     if facts.supply_warning:
         sheet.append(("Предупреждение", facts.supply_warning))
     if facts.backtest_warning:
@@ -181,6 +183,8 @@ def write_report(
     parameter_sheet = workbook.create_sheet("Параметры")
     parameter_sheet.append(("Параметр", "Значение"))
     parameter_sheet.append(("Дата среза", facts.cutoff.isoformat()))
+    if facts.cutoff_source:
+        parameter_sheet.append(("Как определена дата среза", facts.cutoff_source))
     parameter_sheet.append(("Дата расчёта", facts.as_of.isoformat()))
     parameter_sheet.append(("Дата запуска", run_date.isoformat()))
     if parameters is None:

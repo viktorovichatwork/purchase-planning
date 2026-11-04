@@ -3,6 +3,7 @@ from os import getenv
 from purchase_planning import calibration, demand, planner, replenishment, segments, supply
 
 STALE_EXPORT_DAYS = 35
+STALE_EXPORT_STATUS = "Устаревшая выгрузка — черновик, не размещать"
 DEFAULT_LLM_MAX_SKUS = 300
 
 
@@ -69,7 +70,7 @@ def run_parameters() -> dict[str, str | int | float]:
         "На пересмотр при наценке ниже, %": segments.REVIEW_MARKUP_PCT,
         "К закупке при наценке от, %": segments.PURCHASE_MARKUP_PCT,
         "Выход из пересмотра, %": segments.RECOVERY_MARKUP_PCT,
-        "Дата среза при отсутствии метаданных": "Последний день последнего полного месяца продаж",
+        "Дата среза при отсутствии метаданных": "Самая поздняя дата среди конца полного месяца продаж, приходов и заказов",
         "Остаток без строки в выгрузке": 0,
         "Дефицитный месяц": "Нулевой начальный остаток и нет продаж. Исключается из оценки спроса.",
         "Неполные месяцы": "Исключаются из оценки уровня спроса, сезонного профиля и наценки.",

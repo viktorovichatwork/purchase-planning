@@ -11,7 +11,7 @@ from purchase_planning.report import write_report
     ("run_date", "status"),
     [
         (date(2026, 9, 17), None),
-        (date(2026, 9, 18), "Устаревшая выгрузка"),
+        (date(2026, 9, 18), "Устаревшая выгрузка — черновик, не размещать"),
     ],
 )
 def test_order_sheet_uses_facts_and_marks_stale_exports(tmp_path, run_date, status):

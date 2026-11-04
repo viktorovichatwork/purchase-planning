@@ -339,7 +339,7 @@ def test_saved_backtest_excludes_stockouts_and_calibrates_the_order(export):
     assert "57,1%" in (run / "index.html").read_text(encoding="utf-8")
 
 
-def test_missing_metadata_uses_last_complete_month_and_warns_in_report(export):
+def test_missing_metadata_uses_last_complete_month_and_reports_source(export):
     (export / "export_meta.json").unlink()
     facts = plan(export)
     assert facts.as_of == facts.cutoff == date(2026, 7, 31)
@@ -349,7 +349,8 @@ def test_missing_metadata_uses_last_complete_month_and_warns_in_report(export):
     write_report(facts, path)
     workbook = load_workbook(path)
     try:
-        assert "по последнему полному месяцу продаж" in workbook["Заказ по поставщикам"]["B3"].value
+        parameters = dict(workbook["Параметры"].values)
+        assert parameters["Как определена дата среза"] == "по последнему полному месяцу продаж 31.07.2026"
     finally:
         workbook.close()
 
@@ -360,6 +361,34 @@ def test_partially_marked_month_is_excluded_from_fallback(export):
         source.write("SKU-1,tools,2026-08,20,0,1,30,0\n")
 
     assert plan(export).cutoff == date(2026, 7, 31)
+
+
+@pytest.mark.parametrize(("order_date", "metadata_date", "expected", "source", "stock"), [
+    ("2026-07-01", None, date(2026, 8, 1), "по последнему приходу 01.08.2026", 70),
+    ("2026-08-02", None, date(2026, 8, 2), "по последнему заказу 02.08.2026", 70),
+    ("2026-07-01", "2026-07-31", date(2026, 7, 31), "по явно заданной дате выгрузки", 0),
+])
+def test_cutoff_uses_latest_observed_activity_unless_explicit(export, order_date, metadata_date, expected, source, stock):
+    metadata = export / "export_meta.json"
+    if metadata_date is None:
+        metadata.unlink()
+    else:
+        metadata.write_text(json.dumps({"cutoff_date": metadata_date}), encoding="utf-8")
+    sales = export / "sales_monthly.csv"
+    sales.write_text(sales.read_text(encoding="utf-8").replace("2026-08,880,", "2026-08,0,"), encoding="utf-8")
+    with (export / "receipts.csv").open("a", encoding="utf-8") as receipts:
+        receipts.write("SKU-1,2026-08-01,45,SUP-1,import\n")
+    with (export / "purchase_orders.csv").open("a", encoding="utf-8") as orders:
+        orders.write("PO-2,SKU-1,SUP-1,import,2026-07-01,2026-08-01,31,completed,45,45,45,0\n")
+        if order_date == "2026-08-02":
+            orders.write("PO-3,SKU-1,SUP-1,import,2026-08-02,,31,closed,45,0,0,45\n")
+
+    facts = plan(export)
+    assert facts.cutoff == facts.as_of == expected
+    assert facts.cutoff_source == source
+    row = facts.recommendations[0]
+    assert row.stock_at_calculation == stock
+    assert row.in_transit == 0
 
 
 def test_csv_with_only_blank_fields_is_rejected(export):

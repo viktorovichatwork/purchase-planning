@@ -14,7 +14,7 @@ from purchase_planning.order_sheet import (
     coverage_text, displayed_order_qty, excess_rows, order_date_label, rounded_quantity, stock_below_reorder_point,
     stockout_rows, supplier_orders,
 )
-from purchase_planning.parameters import STALE_EXPORT_DAYS
+from purchase_planning.parameters import STALE_EXPORT_DAYS, STALE_EXPORT_STATUS
 from purchase_planning.replenishment import inventory_summary
 from purchase_planning.sku_labels import category_name
 from purchase_planning.wording import days_text
@@ -516,12 +516,10 @@ def write_dashboard(
 ) -> None:
     age = (run_date - facts.cutoff).days
     stale = age > STALE_EXPORT_DAYS
-    status = "Устаревшая выгрузка" if stale else "Актуально"
+    status = STALE_EXPORT_STATUS if stale else "Актуально"
     status_class = "draft" if stale else "current"
-    warnings = "".join(
-        f"<p>{escape(warning)}</p>"
-        for warning in (facts.cutoff_warning, facts.supply_warning) if warning
-    )
+    cutoff_note = f" · {escape(facts.cutoff_source)}" if facts.cutoff_source else ""
+    warnings = f"<p>{escape(facts.supply_warning)}</p>" if facts.supply_warning else ""
     inventory = _hint_list(
         "inventory",
         ((f"{name} — {count} SKU", _INVENTORY_HINTS[name]) for name, count in inventory_summary(facts).items()),
@@ -699,7 +697,7 @@ ul {{ margin: 0; padding-left: 1.25rem; }}
 <header>
 <div>
 <h1>План закупок</h1>
-<p class="meta">Срез <time datetime="{facts.cutoff.isoformat()}">{facts.cutoff:%d.%m.%Y}</time> · {days_text(age)} на дату запуска</p>
+<p class="meta">Срез <time datetime="{facts.cutoff.isoformat()}">{facts.cutoff:%d.%m.%Y}</time>{cutoff_note} · {days_text(age)} на дату запуска</p>
 </div>
 <nav class="actions" aria-label="Действия с отчётом">
 <a class="download" href="report.xlsx" download="report.xlsx">Скачать XLSX</a>
@@ -747,7 +745,7 @@ ul {{ margin: 0; padding-left: 1.25rem; }}
 <li>
 <h3>Проверьте результат</h3>
 <p>Откройте <a href="{_REPOSITORY_URL}/actions/workflows/publish.yml">страницу расчётов в GitHub Actions</a>. Когда новый запуск завершится успешно, обновите портал и сверьте дату среза.</p>
-<p>Портал сам определяет дату среза по продажам. Если последний месяц в CSV неполный, срез приходится на последний день предыдущего полного месяца.</p>
+<p>Портал сравнивает конец последнего полного месяца продаж с датами последнего прихода и последнего заказа. Самая поздняя дата становится датой среза.</p>
 </li>
 </ol>
 <p><a href="#guide">Вернуться к инструкции по работе с порталом</a></p>

@@ -166,7 +166,7 @@ class PlanFacts:
     cutoff: date
     as_of: date
     recommendations: tuple[Recommendation, ...]
-    cutoff_warning: str | None = None
+    cutoff_source: str | None = None
     forecast_months: tuple[date, ...] = ()
     category_profiles: tuple[CategoryProfile, ...] = ()
     suppliers: tuple[SupplierSummary, ...] = ()
