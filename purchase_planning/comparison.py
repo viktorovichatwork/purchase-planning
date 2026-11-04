@@ -1,4 +1,5 @@
 from collections import Counter, defaultdict
+from dataclasses import dataclass
 from enum import StrEnum
 from math import ceil
 from typing import NotRequired, TypedDict
@@ -44,6 +45,33 @@ class Change(TypedDict):
     stockout_risk: tuple[bool, bool]
     drivers: list[Driver]
     flags: list[str]
+
+
+@dataclass(frozen=True)
+class ChangeCounts:
+    increased: int
+    decreased: int
+    segments: int
+    new_risks: int
+    resolved_risks: int
+    unconfirmed: int
+    by_driver: Counter[Driver]
+
+    @property
+    def quantities(self) -> int:
+        return self.increased + self.decreased
+
+
+def count_changes(changes: list[Change]) -> ChangeCounts:
+    return ChangeCounts(
+        increased=sum(old < new for old, new in (row["order_qty"] for row in changes)),
+        decreased=sum(old > new for old, new in (row["order_qty"] for row in changes)),
+        segments=sum(old != new for old, new in (row["segment"] for row in changes)),
+        new_risks=sum(not old and new for old, new in (row["stockout_risk"] for row in changes)),
+        resolved_risks=sum(old and not new for old, new in (row["stockout_risk"] for row in changes)),
+        unconfirmed=sum(bool(row["flags"]) for row in changes),
+        by_driver=Counter(code for row in changes for code in set(row["drivers"])),
+    )
 
 
 def comparison_evidence(
@@ -119,15 +147,12 @@ def summarize(previous: str | None, changes: list[Change]) -> str:
     if not changes:
         return "Изменений нет."
 
-    quantities = sum(row["order_qty"][0] != row["order_qty"][1] for row in changes)
-    segments = sum(row["segment"][0] != row["segment"][1] for row in changes)
-    new_risks = sum(not before and after for before, after in (row["stockout_risk"] for row in changes))
-    resolved_risks = sum(before and not after for before, after in (row["stockout_risk"] for row in changes))
-    counts = {label: sum(code in row["drivers"] for row in changes) for code, label in DRIVER_LABELS.items()}
-    causes = ", ".join(f"{label} — {count}" for label, count in counts.items() if count)
-    unconfirmed = sum(bool(row["flags"]) for row in changes)
+    counts = count_changes(changes)
+    causes = ", ".join(
+        f"{label} — {counts.by_driver[code]}" for code, label in DRIVER_LABELS.items() if counts.by_driver[code]
+    )
     return (
-        f"К заказу изменилось у {quantities} SKU, сегмент — у {segments}. "
-        f"Новые риски — {new_risks}, ушедшие — {resolved_risks}.\n"
-        f"Наблюдаемые причины — {causes or 'нет'}. Без подтверждённой причины — {unconfirmed}."
+        f"К заказу изменилось у {counts.quantities} SKU, сегмент — у {counts.segments}. "
+        f"Новые риски — {counts.new_risks}, ушедшие — {counts.resolved_risks}.\n"
+        f"Наблюдаемые причины — {causes or 'нет'}. Без подтверждённой причины — {counts.unconfirmed}."
     )

@@ -20,6 +20,8 @@ jobs:
     timeout-minutes: 25
     permissions:
       contents: write
+    outputs:
+      artifact: ${{ steps.artifact-name.outputs.name }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -36,6 +38,18 @@ jobs:
         run: |
           set -euo pipefail
           export PURCHASE_CODE_REVISION="$(git rev-parse HEAD)"
+          if [[ -d runs ]]; then
+            last_run="$(find runs -mindepth 2 -maxdepth 2 -name run.json | sort -V | tail -n 1)"
+            if [[ -n "$last_run" ]]; then
+              last_source="$(python -c 'import json, sys; print(json.load(open(sys.argv[1])).get("source_revision") or "")' "$last_run")"
+              if [[ -n "$last_source" && "$last_source" != "$GITHUB_SHA" ]] \
+                && git merge-base --is-ancestor "$GITHUB_SHA" "$last_source" \
+                && [[ "$(git rev-parse "$GITHUB_SHA:inbox")" != "$(git rev-parse "$last_source:inbox")" ]]; then
+                echo "::error::Уже обработана выгрузка из более нового коммита."
+                exit 1
+              fi
+            fi
+          fi
           mkdir -p "$RUNNER_TEMP/export/inbox"
           if git cat-file -e "$GITHUB_SHA:inbox"; then
             git archive "$GITHUB_SHA" inbox | tar -x -C "$RUNNER_TEMP/export"
@@ -61,9 +75,13 @@ jobs:
               git push origin HEAD:main
             fi
           fi
+      - name: Имя артефакта попытки
+        id: artifact-name
+        run: echo "name=github-pages-${GITHUB_RUN_ATTEMPT}" >> "$GITHUB_OUTPUT"
       - uses: actions/upload-pages-artifact@v3
         with:
           path: ${{ runner.temp }}/site
+          name: ${{ steps.artifact-name.outputs.name }}
 
   deploy:
     needs: calculate
@@ -78,9 +96,11 @@ jobs:
     steps:
       - uses: actions/deploy-pages@v4
         id: deployment
+        with:
+          artifact_name: ${{ needs.calculate.outputs.artifact }}
       - uses: actions/download-artifact@v4
         with:
-          name: github-pages
+          name: ${{ needs.calculate.outputs.artifact }}
       - name: Проверить опубликованную дату среза
         env:
           PAGE_URL: ${{ steps.deployment.outputs.page_url }}

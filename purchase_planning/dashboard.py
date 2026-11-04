@@ -7,9 +7,9 @@ from pathlib import Path
 
 from purchase_planning.comparison import Change, summarize
 from purchase_planning.explanations import Explanations
-from purchase_planning.facts import OrderFlag, PlanFacts, Recommendation, Segment
+from purchase_planning.facts import OrderFlag, PlanFacts, Recommendation, Segment, SupplierSummary
 from purchase_planning.order_sheet import (
-    displayed_order_qty, excess_rows, order_date_label, stockout_rows, supplier_orders,
+    SupplierOrder, displayed_order_qty, excess_rows, order_date_label, stockout_rows, supplier_orders,
 )
 from purchase_planning.parameters import STALE_EXPORT_DAYS
 from purchase_planning.replenishment import inventory_summary
@@ -53,10 +53,10 @@ def _sku(row: Recommendation, facts: PlanFacts, explanation: str, supplier_flags
     return f"<li><strong>{escape(row.sku_id)}</strong><dl>{fields_html}</dl>{why}</li>"
 
 
-def _order_table(facts: PlanFacts, explanations: dict[str, str]) -> str:
+def _order_table(facts: PlanFacts, orders: list[SupplierOrder], explanations: dict[str, str]) -> str:
     summaries = {supplier.supplier_id: supplier for supplier in facts.suppliers}
     rows = []
-    for supplier, lines, total in supplier_orders(facts):
+    for supplier, lines, total in orders:
         summary = summaries.get(supplier)
         if summary and summary.next_order_date:
             when = order_date_label(summary.next_order_date, facts.as_of, date_format="%d.%m.%Y")
@@ -77,9 +77,10 @@ def _order_table(facts: PlanFacts, explanations: dict[str, str]) -> str:
     return '<p class="meta">Когда заказать и сколько штук. Откройте поставщика, чтобы увидеть SKU.</p>' + "\n".join(rows)
 
 
-def _decision(facts: PlanFacts, previous_run: str | None, changes: list[Change], explanation: str) -> str:
-    orders = {supplier for supplier, _, _ in supplier_orders(facts)}
-    suppliers = [row for row in facts.suppliers if row.supplier_id in orders]
+def _decision(
+    facts: PlanFacts, suppliers: list[SupplierSummary], previous_run: str | None, changes: list[Change],
+    explanation: str,
+) -> str:
     due = sum(row.time_to_order for row in suppliers)
     soon = sum(
         not row.time_to_order and row.next_order_date is not None
@@ -138,14 +139,13 @@ def _seasons(facts: PlanFacts) -> str:
     )
 
 
-def _calendar(facts: PlanFacts) -> str:
+def _calendar(as_of: date, suppliers: list[SupplierSummary]) -> str:
     labels = ("янв.", "февр.", "март", "апр.", "май", "июнь", "июль", "авг.", "сент.", "окт.", "нояб.", "дек.")
-    first = facts.as_of.year * 12 + facts.as_of.month - 1
+    first = as_of.year * 12 + as_of.month - 1
     counts: Counter[int] = Counter()
-    orders = {supplier for supplier, _, _ in supplier_orders(facts)}
-    for row in facts.suppliers:
-        if row.supplier_id in orders and row.next_order_date:
-            day = max(facts.as_of, row.next_order_date)
+    for row in suppliers:
+        if row.next_order_date:
+            day = max(as_of, row.next_order_date)
             counts[day.year * 12 + day.month - 1] += 1
     months = [divmod(month, 12) for month in range(first, first + 6)]
     values = [counts[year * 12 + month] for year, month in months]
@@ -183,8 +183,17 @@ def _backtest_quality(facts: PlanFacts) -> str:
     metric = next((row for row in result.metrics if row.breakdown == row.group == "Все"), None)
     if metric is None or metric.wape is None or metric.bias is None:
         return f"{warning}<p>Недостаточно данных для оценки качества прогноза.</p>"
-    return (f"<p>WAPE {_decimal(metric.wape * 100)}% · Смещение {_decimal(metric.bias * 100)}% · "
-            "WAPE показывает суммарную абсолютную ошибку, смещение — отклонение прогноза от факта.</p>" + warning)
+    overview = (f"<p>WAPE {_decimal(metric.wape * 100)}% · Смещение {_decimal(metric.bias * 100)}% · "
+                "WAPE показывает суммарную абсолютную ошибку, смещение — отклонение прогноза от факта.</p>")
+    breakdown = _table(
+        "Бэктест по группам",
+        ("Разрез", "Группа", "Окон", "WAPE", "Смещение", "WAPE среднего за 12 мес", "Смещение среднего за 12 мес"),
+        ((row.breakdown, row.group, row.windows, *(
+            f"{_decimal(value * 100)}%" if value is not None else "—"
+            for value in (row.wape, row.bias, row.baseline_wape, row.baseline_bias)
+        )) for row in result.metrics),
+    )
+    return overview + warning + f"<details><summary>По категориям и типам спроса</summary>{breakdown}</details>"
 
 
 def write_dashboard(
@@ -200,13 +209,16 @@ def write_dashboard(
         for warning in (facts.cutoff_warning, facts.supply_warning) if warning
     )
     inventory = "".join(f"<li>{name} — {count} SKU</li>" for name, count in inventory_summary(facts).items())
+    orders = supplier_orders(facts)
+    ordering_suppliers = {supplier for supplier, _, _ in orders}
+    suppliers = [row for row in facts.suppliers if row.supplier_id in ordering_suppliers]
     sections = (
-        ("Сводка решения", _decision(facts, previous_run, changes, explanations.summary if explanations else "")),
-        ("Заказ по поставщикам", _order_table(facts, explanations.rows if explanations else {})),
+        ("Сводка решения", _decision(facts, suppliers, previous_run, changes, explanations.summary if explanations else "")),
+        ("Заказ по поставщикам", _order_table(facts, orders, explanations.rows if explanations else {})),
         ("Риски дефицита", _risks(facts)),
         ("Избыток", _excess(facts)),
         ("Сезонные заказы", _seasons(facts)),
-        ("Календарь заказов на 6 месяцев", _calendar(facts)),
+        ("Календарь заказов на 6 месяцев", _calendar(facts.as_of, suppliers)),
         ("Качество прогноза", _backtest_quality(facts)),
         ("Запас", f"<ul>{inventory}</ul>"),
         ("Сегменты ассортимента", _segments(facts)),

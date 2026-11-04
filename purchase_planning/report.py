@@ -12,7 +12,7 @@ from purchase_planning.facts import OrderFlag, PlanFacts, Recommendation, Segmen
 from purchase_planning.order_sheet import (
     displayed_order_qty, excess_rows, order_date_label, rounded_quantity, stockout_rows, supplier_orders,
 )
-from purchase_planning.parameters import STALE_EXPORT_DAYS, run_parameters
+from purchase_planning.parameters import PARAMETER_NUMBER_FORMATS, STALE_EXPORT_DAYS, run_parameters
 from purchase_planning.replenishment import inventory_summary
 
 
@@ -73,6 +73,8 @@ def write_report(
         season = row.seasonal_order
         regular_placement = row.order_by if row.grouped_season_deadline else row.regular_order_date
         transit = ", ".join(f"{month:%Y-%m} — {round(quantity)}" for month, quantity in row.in_transit_by_month)
+        if sum(round(qty) for _, qty in row.in_transit_by_month) != round(row.in_transit):
+            transit += f" · итого {round(row.in_transit)} шт."
         target.append((
             row.supplier_id or "Поставщик не указан", row.sku_id, displayed_order_qty(row), row.excluded_stockout_months,
             round(fsum(row.monthly_forecast)), "Да" if row.low_data else None,
@@ -150,12 +152,8 @@ def write_report(
     parameter_sheet.append(("Дата запуска", run_date.isoformat()))
     for name, value in (run_parameters() if parameters is None else parameters).items():
         parameter_sheet.append((name, value))
-        if isinstance(value, (int, float)):
-            cell = parameter_sheet.cell(parameter_sheet.max_row, 2)
-            if "%" in name or "мес" in name:
-                cell.number_format = "0.0"
-            elif name.startswith(("Минимальная доля", "Максимальная доля", "Порог отсутствующей", "Порог флага возвратов")):
-                cell.number_format = "0.0%"
+        if name in PARAMETER_NUMBER_FORMATS:
+            parameter_sheet.cell(parameter_sheet.max_row, 2).number_format = PARAMETER_NUMBER_FORMATS[name]
     parameter_sheet.column_dimensions["A"].width = 60
     parameter_sheet.column_dimensions["B"].width = 115
     workbook.save(path)

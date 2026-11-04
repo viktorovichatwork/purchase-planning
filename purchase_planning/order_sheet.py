@@ -4,6 +4,8 @@ from math import ceil, isclose
 
 from purchase_planning.facts import PlanFacts, Recommendation
 
+SupplierOrder = tuple[str, list[Recommendation], int]
+
 
 def rounded_quantity(quantity: float, multiple: int) -> int:
     packs = quantity / multiple
@@ -27,7 +29,7 @@ def order_date_label(day: date, as_of: date, *, date_format: str = "%Y-%m-%d") -
     return "Сейчас" if day == as_of else day.strftime(date_format)
 
 
-def supplier_orders(facts: PlanFacts) -> list[tuple[str, list[Recommendation], int]]:
+def supplier_orders(facts: PlanFacts) -> list[SupplierOrder]:
     due = {supplier.supplier_id for supplier in facts.suppliers if supplier.time_to_order}
     rows = sorted(
         (row for row in facts.recommendations if row.order_qty > 0),

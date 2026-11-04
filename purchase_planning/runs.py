@@ -173,6 +173,8 @@ def main() -> int:
     parser.add_argument("--reject-duplicate", action="store_true", help="Отклонять ранее обработанную выгрузку")
     args = parser.parse_args()
     try:
+        if args.site_dir and args.site_dir.exists():
+            raise FileExistsError(f"Каталог сайта уже существует: {args.site_dir}")
         result = run_plan(
             args.data_dir, args.history_dir, stub_llm=args.stub_llm,
             refresh_backtest=args.refresh_backtest, reject_duplicate=args.reject_duplicate,
