@@ -313,10 +313,12 @@ def test_order_covers_cycle_and_safety_stock_at_arrival(export):
     assert (timing.lead_days, timing.cycle_days) == (120, 60)
     assert row.stock_at_calculation == row.stock_at_arrival == 0
     assert sum(row.monthly_forecast) == pytest.approx(180)
-    assert row.safety_stock == pytest.approx(90)
-    assert row.target_stock == pytest.approx(150)
-    assert row.order_qty == pytest.approx(150)
-    assert facts.suppliers[0].order_qty == 200
+    # Nothing is in stock before arrival, so faster sales cannot eat it: the safety stock
+    # protects only the 60-day cycle after arrival, (1.5 - 1) x 60.
+    assert row.safety_stock == pytest.approx(30)
+    assert row.target_stock == pytest.approx(90)
+    assert row.order_qty == pytest.approx(90)
+    assert facts.suppliers[0].order_qty == 100
 
 
 def test_saved_backtest_excludes_stockouts_and_calibrates_the_order(export):
@@ -1098,12 +1100,12 @@ def test_long_lead_recommended_batch_does_not_become_excess(export):
     }), encoding="utf-8")
 
     before = plan(export)
-    assert before.recommendations[0].order_qty == pytest.approx(440)
-    assert before.suppliers[0].order_qty == 440
+    assert before.recommendations[0].order_qty == pytest.approx(240)
+    assert before.suppliers[0].order_qty == 240
     with orders.open("a", encoding="utf-8") as source:
-        source.write("PO-3,SKU-1,SUP-1,import,2026-03-01,2026-09-17,180,open,440,440,0,440\n")
+        source.write("PO-3,SKU-1,SUP-1,import,2026-03-01,2026-09-17,180,open,240,240,0,240\n")
     after, = plan(export).recommendations
-    assert after.in_transit == 440
+    assert after.in_transit == 240
     assert after.excess_threshold == pytest.approx(650)
     assert not after.excess
 

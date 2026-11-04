@@ -152,7 +152,7 @@ def test_dashboard_splits_supplier_batches_and_uses_calendar_dates_in_decision(t
     suppliers = page.findall(".//section[@id='orders']/div/div/details/summary")
     assert [supplier.find("strong").text for supplier in suppliers] == ["SUP-Z", "SUP-B", "SUP-A"]
     assert [batch.text for batch in suppliers[0].findall("span[@class='batch']")] == [
-        "Обычная партия — Сейчас · срок 12.08.2026 — 3 шт.",
+        "Обычная партия — Сейчас — 3 шт.",
         "Обычная партия — 12.09.2026 — 2 шт.",
         "Сезонная партия — до 12.09.2026 — 6 шт.",
     ]
