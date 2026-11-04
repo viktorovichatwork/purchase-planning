@@ -5,7 +5,7 @@ from math import ceil, isclose
 from statistics import median, quantiles
 
 from purchase_planning.export import ExportValidationError, finite_quantity
-from purchase_planning.facts import SupplierTiming
+from purchase_planning.facts import OrderFlag, SupplierTiming
 
 LEAD_HISTORY_START = date(2025, 1, 1)
 MIN_ORDERS = 5
@@ -225,5 +225,5 @@ def classify_transit(
             shortage = line.ordered - line.received
             limit = line.ordered * ORDER_TAIL_SHARE
             is_tail = shortage <= limit or isclose(shortage, limit, rel_tol=1e-12)
-            flags[line.sku].add("Хвост заказа" if is_tail else "Зависший заказ")
+            flags[line.sku].add(OrderFlag.TAIL if is_tail else OrderFlag.STUCK)
     return arrivals, flags

@@ -106,3 +106,23 @@ def compare(
             drivers=drivers, flags=[] if drivers else ["Причина не подтверждена данными"],
         ))
     return changes
+
+
+def summarize(previous: str | None, changes: list[Change]) -> str:
+    if previous is None:
+        return "Первый запуск, истории для сравнения нет."
+    if not changes:
+        return "Изменений нет."
+
+    quantities = sum(row["order_qty"][0] != row["order_qty"][1] for row in changes)
+    segments = sum(row["segment"][0] != row["segment"][1] for row in changes)
+    new_risks = sum(not before and after for before, after in (row["stockout_risk"] for row in changes))
+    resolved_risks = sum(before and not after for before, after in (row["stockout_risk"] for row in changes))
+    counts = {label: sum(code in row["drivers"] for row in changes) for code, label in DRIVER_LABELS.items()}
+    causes = ", ".join(f"{label} — {count}" for label, count in counts.items() if count)
+    unconfirmed = sum(bool(row["flags"]) for row in changes)
+    return (
+        f"К заказу изменилось у {quantities} SKU, сегмент — у {segments}. "
+        f"Новые риски — {new_risks}, ушедшие — {resolved_risks}.\n"
+        f"Наблюдаемые причины — {causes or 'нет'}. Без подтверждённой причины — {unconfirmed}."
+    )

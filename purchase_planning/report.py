@@ -1,13 +1,13 @@
 from collections.abc import Mapping
 from datetime import date
-from itertools import groupby
-from math import ceil, fsum
+from math import fsum
 from pathlib import Path
 
 from openpyxl import Workbook
 from openpyxl.styles import Font
 
 from purchase_planning.facts import PlanFacts, Segment
+from purchase_planning.order_sheet import displayed_order_qty, supplier_orders
 from purchase_planning.parameters import STALE_EXPORT_DAYS, run_parameters
 
 
@@ -47,18 +47,12 @@ def write_report(
         if segment != Segment.PURCHASE:
             segment_sheets[segment] = workbook.create_sheet(segment)
             segment_sheets[segment].append(headers)
-    due_suppliers = {supplier.supplier_id for supplier in facts.suppliers if supplier.time_to_order}
-    order_rows = sorted(
-        (row for row in facts.recommendations if row.order_qty > 0),
-        key=lambda row: (row.supplier_id not in due_suppliers, row.supplier_id, -row.order_qty, row.sku_id),
-    )
-
     def append_sku(target, row):
         summary = summaries.get(row.supplier_id)
         timing = summary.timing if summary else None
         transit = ", ".join(f"{month:%Y-%m} — {round(quantity)}" for month, quantity in row.in_transit_by_month)
         target.append((
-            row.supplier_id or "Поставщик не указан", row.sku_id, ceil(row.order_qty), row.excluded_stockout_months,
+            row.supplier_id or "Поставщик не указан", row.sku_id, displayed_order_qty(row), row.excluded_stockout_months,
             round(fsum(row.monthly_forecast)), "Да" if row.low_data else None,
             timing.lead_days if timing else None, timing.lead_source if timing else None,
             timing.cycle_days if timing else None, round(row.stock_at_calculation),
@@ -75,11 +69,9 @@ def write_report(
             cell.data_type = "s"
         target.cell(target.max_row, headers.index("Наценка за 12 мес, %") + 1).number_format = "0.0"
 
-    for supplier, group in groupby(order_rows, key=lambda row: row.supplier_id):
-        total = 0
+    for supplier, group, total in supplier_orders(facts):
         for row in group:
             append_sku(sheet, row)
-            total += ceil(row.order_qty)
         summary = summaries.get(supplier)
         sheet.append((
             supplier or "Поставщик не указан", "Итого", total,
