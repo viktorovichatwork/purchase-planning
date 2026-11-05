@@ -234,7 +234,8 @@ function showStatus(text, kind) {
 }
 
 async function latestRun() {
-    const response = await fetch(uploadForm.dataset.runsUrl, {cache: "no-store"});
+    // A request without a deadline can hang and stop the polling loop: give up after 15 s and poll again.
+    const response = await fetch(uploadForm.dataset.runsUrl, {cache: "no-store", signal: AbortSignal.timeout(15000)});
     if (!response.ok) return null;
     return (await response.json()).workflow_runs?.[0] ?? null;
 }
