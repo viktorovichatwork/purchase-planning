@@ -258,7 +258,7 @@ def plan_inventory(
 
     decision = row.decision
     if decision is not None:
-        reasons = [reason for reason in decision.reasons if reason not in {
+        reasons: list[DecisionReason] = [reason for reason in decision.reasons if reason not in {
             DecisionReason.LATE_SEASON, DecisionReason.SMALL_LATE_SEASON,
         }]
         if seasonal_order is not None:
