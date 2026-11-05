@@ -2,6 +2,7 @@ from dataclasses import dataclass
 from datetime import date
 from enum import StrEnum
 from math import fsum
+from typing import Any
 
 from purchase_planning.facts import DecisionFacts, DecisionReason, Segment
 
@@ -75,7 +76,7 @@ def classify_sku(
     sales: list[Sale], first_sale: date | None, *, as_of: date, last_complete_month: int,
     had_recent_stock: bool, low_data: bool,
 ) -> Assortment:
-    window = {"as_of": as_of, "last_complete_month": last_complete_month}
+    window: dict[str, Any] = {"as_of": as_of, "last_complete_month": last_complete_month}
     recent_sales = [sale for sale in sales if in_assortment_window(sale.month, **window)]
     sold = fsum(sale.quantity for sale in recent_sales)
     returned = fsum(sale.returns for sale in recent_sales)

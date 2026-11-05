@@ -1,15 +1,18 @@
 from collections.abc import Mapping
+from dataclasses import replace
 from datetime import date
 from math import fsum
 from pathlib import Path
+from typing import Any
 
 from openpyxl import Workbook
 from openpyxl.comments import Comment
 from openpyxl.styles import Font
+from openpyxl.utils import get_column_letter
 from openpyxl.worksheet.worksheet import Worksheet
 
 from purchase_planning.actions import Action, SkipReason, action, decision_facts, skip_reason, todo_text, why_text
-from purchase_planning.calibration import METRIC_HEADERS, stock_multiplier
+from purchase_planning.calibration import METRIC_HEADERS, METRIC_HINTS, stock_multiplier
 from purchase_planning.facts import (
     UNCONFIRMED_ORDERS_LABEL, OrderFlag, PlanFacts, Recommendation, Segment,
 )
@@ -53,6 +56,7 @@ def write_report(
 ) -> None:
     if run_date is None:
         run_date = date.today()
+    facts = replace(facts, today=run_date)
     labels = sku_labels or {}
 
     workbook = Workbook()
@@ -86,7 +90,7 @@ def write_report(
         "Размещение обычной партии",
     )
     sheet.append((*headers, f"{Action.DECIDE}: почему"))
-    confirmation_column = sheet.cell(row=sheet.max_row, column=len(headers) + 1).column_letter
+    confirmation_column = get_column_letter(len(headers) + 1)
     sheet.column_dimensions[confirmation_column].width = 26
     summaries = {supplier.supplier_id: supplier for supplier in facts.suppliers}
     forecast_sheet = workbook.create_sheet("Прогноз")
@@ -108,7 +112,7 @@ def write_report(
     orders = prepare_orders(facts)
     supplier_dates = {
         schedule.supplier_id: order_date_label(
-            schedule.deadline, facts.as_of, below_reorder_point=schedule.low_stock,
+            schedule.deadline, facts.order_from, below_reorder_point=schedule.low_stock,
         )
         for schedule in orders.suppliers if schedule.supplier_id
     }
@@ -127,7 +131,7 @@ def write_report(
         transit = ", ".join(f"{month:%Y-%m} — {round(quantity)}" for month, quantity in row.in_transit_by_month)
         if sum(round(qty) for _, qty in row.in_transit_by_month) != round(row.in_transit):
             transit += f" · итого {round(row.in_transit)} шт."
-        values = (
+        values: tuple[Any, ...] = (
             row.supplier_id or "Поставщик не указан", row.sku_id, labels.get(row.sku_id) or None,
             displayed_order_qty(row), row.excluded_stockout_months,
             round(fsum(row.monthly_forecast)), "Да" if row.low_data else None,
@@ -146,14 +150,14 @@ def write_report(
             row.demand_type, row.order_qty, row.order_multiple,
             _coverage_cell(row),
             _stock_until_label(row),
-            _sku_order_date(row, row.order_by, facts.as_of),
+            _sku_order_date(row, row.order_by, facts.order_from),
             supplier_dates.get(row.supplier_id),
             regular_batch.quantity if regular_batch else None,
             seasonal_batch.quantity if seasonal_batch else None,
             row.grouped_season_deadline.isoformat() if row.grouped_season_deadline else (
                 season.deadline.isoformat() if season else None
             ),
-            _sku_order_date(row, regular_batch.deadline, facts.as_of) if regular_batch else None,
+            _sku_order_date(row, regular_batch.deadline, facts.order_from) if regular_batch else None,
         )
         offset = 0
         if target is sheet:
@@ -171,8 +175,8 @@ def write_report(
         target.cell(target.max_row, offset + headers.index("Покрытие, мес") + 1).number_format = "0.0"
 
     for schedule in orders.suppliers:
-        supplier, group, total = schedule.supplier_id, schedule.lines, schedule.quantity
-        for row in group:
+        supplier, lines, total = schedule.supplier_id, schedule.lines, schedule.quantity
+        for row in lines:
             append_sku(sheet, row)
         summary = summaries.get(supplier)
         sheet.append((
@@ -192,12 +196,12 @@ def write_report(
             row.supplier_id or "Поставщик не указан", row.sku_id, labels.get(row.sku_id) or None,
             *(round(qty) for qty in row.monthly_forecast),
             _coverage_cell(row),
-            _stock_until_label(row), _sku_order_date(row, row.order_by, facts.as_of),
+            _stock_until_label(row), _sku_order_date(row, row.order_by, facts.order_from),
         ))
         forecast_sheet.cell(forecast_sheet.max_row, 4 + len(facts.forecast_months)).number_format = "0.0"
         for cell in forecast_sheet[forecast_sheet.max_row][:3]:
             cell.data_type = "s"
-    skip_order = {reason: index for index, reason in enumerate(SkipReason)}
+    skip_order: dict[SkipReason | None, int] = {reason: index for index, reason in enumerate(SkipReason)}
     for group, target in action_sheets.items():
         # Match the portal: no-sales rows by stock, price/cost rows by sales, decisions by quantity.
         for row in sorted(
@@ -217,7 +221,7 @@ def write_report(
         for cell in header_row:
             if cell.value in {"Наценка за 12 мес, %", "Продажи за 12 мес, шт."}:
                 cell.comment = Comment(
-                    "Период: 12 полных месяцев плюс текущий неполный месяц, по дату среза ERP. "
+                    "Период: 12 полных месяцев плюс текущий неполный месяц, по дату данных ERP. "
                     "Наценка взвешена по проданным штукам.", "Планирование закупок",
                 )
 
@@ -229,7 +233,7 @@ def write_report(
     if facts.cutoff_source:
         parameter_sheet.append(("Как определена дата данных", facts.cutoff_source))
     parameter_sheet.append(("Дата расчёта", facts.as_of.isoformat()))
-    parameter_sheet.append(("Дата запуска", run_date.isoformat()))
+    parameter_sheet.append(("Дата формирования отчёта", run_date.isoformat()))
     if parameters is None:
         parameters = run_parameters() | {"LLM_MAX_SKUS": llm_max_skus()}
     for name, value in parameters.items():
@@ -291,7 +295,7 @@ def _append_inventory_sheets(
             "Рассмотреть ускоренную доставку" if season.expedite else None,
             round(season.order_qty), row.order_multiple,
             round(season.stock_at_arrival), round(season.target_stock), round(season.safety_stock),
-            "Да" if season_order_soon(row, facts.as_of) else "Нет",
+            "Да" if season_order_soon(row, facts.order_from) else "Нет",
         ))
         seasonal.cell(seasonal.max_row, 9).number_format = "0.0"
         seasonal.cell(seasonal.max_row, 4).data_type = "s"
@@ -336,6 +340,8 @@ def _append_backtest(sheet: Worksheet, facts: PlanFacts) -> None:
     sheet.append(("Данные бэктеста на", result.cutoff.isoformat()))
     sheet.append(("Точки с оценёнными окнами", ", ".join(f"{origin:%Y-%m}" for origin in result.origins)))
     sheet.append(METRIC_HEADERS)
+    for cell, header in zip(sheet[sheet.max_row], METRIC_HEADERS, strict=True):
+        cell.comment = Comment(METRIC_HINTS[header], "Планирование закупок")
     for row in result.metrics:
         sheet.append((row.breakdown, row.group, row.windows, row.wape, row.bias, row.baseline_wape, row.baseline_bias))
         for cell in sheet[sheet.max_row][3:]:

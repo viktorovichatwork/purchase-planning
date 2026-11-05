@@ -1,6 +1,6 @@
 import csv
 from collections import Counter
-from dataclasses import replace
+from dataclasses import asdict, replace
 from datetime import date, timedelta
 from pathlib import Path
 from xml.etree import ElementTree
@@ -21,6 +21,51 @@ from purchase_planning.planner import plan
 from purchase_planning.report import write_report
 from purchase_planning.summary import plan_summary
 from purchase_planning.sku_labels import load_sku_labels
+
+
+@pytest.mark.parametrize("offset", [-1, 0, 1])
+def test_season_group_marks_only_past_stored_deadlines_as_historical(tmp_path, offset):
+    report_day = date(2028, 11, 5)
+    deadline = report_day + timedelta(days=offset)
+    season = SeasonalOrder(
+        date(2027, 5, 1), date(2027, 7, 31), date(2027, 1, 1), 0, 3,
+        10, 10, 0, deadline, SeasonStatus.ON_TIME, 0, 10, 0,
+    )
+    facts = PlanFacts(
+        date(2026, 8, 13), date(2026, 8, 13),
+        (Recommendation("SKU-OLD", "SUP-1", 10, regular_order_qty=0, seasonal_order=season),),
+    )
+    before = asdict(facts)
+    path = tmp_path / "index.html"
+    write_dashboard(facts, path, run_date=report_day, previous_run=None, changes=[])
+    page = ElementTree.fromstring(path.read_text(encoding="utf-8").split("\n", 1)[1])
+    group = page.find(".//section[@id='seasons']//details[@data-search]")
+    heading = "".join(group.find("summary").itertext())
+    assert f"{deadline:%d.%m.%Y}" in heading
+    assert ("Исторический срок" in heading) == (offset < 0)
+    warning = group.find("p")
+    if offset < 0:
+        assert warning is not None
+        assert "загрузите свежую выгрузку ERP" in "".join(warning.itertext())
+    else:
+        assert warning is None
+    assert "10 шт." in "".join(group.itertext())
+    assert page.findall(".//li[@data-season-soon='true']") == []
+    assert asdict(facts) == before
+
+
+def test_old_full_export_marks_all_expired_season_groups(tmp_path):
+    facts = plan(Path(__file__).parents[1])
+    path = tmp_path / "index.html"
+    write_dashboard(facts, path, run_date=date(2028, 11, 5), previous_run=None, changes=[])
+    page = ElementTree.fromstring(path.read_text(encoding="utf-8").split("\n", 1)[1])
+    groups = page.findall(".//section[@id='seasons']//details[@data-search]")
+    assert groups
+    assert sum(len(group.findall(".//li[@data-season-soon]")) for group in groups) == 165
+    for group in groups:
+        assert "Исторический срок" in "".join(group.find("summary").itertext())
+    example = next(group for group in groups if "SKU-400EC4" in "".join(group.itertext()))
+    assert "06.11.2027" in "".join(example.find("summary").itertext())
 
 
 def test_dashboard_matches_workbook_and_displays_facts(tmp_path):
@@ -154,8 +199,9 @@ def test_risk_table_lists_the_same_skus_as_the_workbook(tmp_path):
 
 def test_dashboard_splits_supplier_batches_and_uses_calendar_dates_in_decision(tmp_path):
     day = date(2026, 8, 13)
-    in_30 = day + timedelta(days=30)
-    in_31 = day + timedelta(days=31)
+    # Order deadlines count from the day the dashboard is built, two days after the ERP data.
+    in_30 = day + timedelta(days=2 + 30)
+    in_31 = day + timedelta(days=2 + 31)
     timing = SupplierTiming(20, "История", 60)
 
     def season(deadline):
@@ -196,8 +242,8 @@ def test_dashboard_splits_supplier_batches_and_uses_calendar_dates_in_decision(t
         workbook.close()
     assert [batch.text for batch in suppliers[0].findall("span[@class='batch']")] == [
         "Обычная партия — Сейчас — 3 шт.",
-        "Обычная партия — 12.09.2026 — 2 шт.",
-        "Сезонная партия — до 12.09.2026 — 6 шт.",
+        "Обычная партия — 14.09.2026 — 2 шт.",
+        "Сезонная партия — до 14.09.2026 — 6 шт.",
     ]
     assert "запас ниже точки заказа" in "".join(suppliers[0].itertext())
     assert "опоздание" not in "".join(page.itertext())

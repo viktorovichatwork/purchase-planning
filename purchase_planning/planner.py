@@ -6,6 +6,7 @@ from datetime import date, timedelta
 from math import ceil, fsum
 from pathlib import Path
 from statistics import median
+from typing import Any
 
 from purchase_planning.calibration import read_backtest
 from purchase_planning.demand import (
@@ -35,12 +36,15 @@ class Calculation:
 
 
 def _typical_timing(timings: Iterable[SupplierTiming]) -> SupplierTiming | None:
-    known = [terms for terms in timings if terms.horizon_days is not None]
+    known = [
+        (terms.lead_days, terms.cycle_days) for terms in timings
+        if terms.lead_days is not None and terms.cycle_days is not None
+    ]
     if not known:
         return None
     return SupplierTiming(
-        ceil(median(terms.lead_days for terms in known)), TYPICAL_TIMING_SOURCE,
-        ceil(median(terms.cycle_days for terms in known)),
+        ceil(median(lead for lead, _ in known)), TYPICAL_TIMING_SOURCE,
+        ceil(median(cycle for _, cycle in known)),
     )
 
 
@@ -141,7 +145,7 @@ def calculate_export(
     month_receipts: dict[str, dict[date, float]] = defaultdict(lambda: defaultdict(float))
     current_month = month_index(calculation_date)
     last_complete_month = current_month - (calculation_date < stock_month or stock_month in partial_months)
-    window = {"as_of": calculation_date, "last_complete_month": last_complete_month}
+    window: dict[str, Any] = {"as_of": calculation_date, "last_complete_month": last_complete_month}
     recent_stock = {
         sku for (sku, month), quantity in stock.items() if quantity > 0 and in_assortment_window(month, **window)
     }

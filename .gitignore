@@ -3,3 +3,7 @@ __pycache__/
 *.pyc
 .venv/
 .env
+output/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
