@@ -233,34 +233,39 @@ function showStatus(text, kind) {
     uploadStatus.hidden = false;
 }
 
-async function latestRun() {
-    // A request without a deadline can hang and stop the polling loop: give up after 15 s and poll again.
-    const response = await fetch(uploadForm.dataset.runsUrl, {cache: "no-store", signal: AbortSignal.timeout(15000)});
-    if (!response.ok) return null;
-    return (await response.json()).workflow_runs?.[0] ?? null;
-}
+// Every request has a deadline: a hung request must not stop the polling loop.
+const fetchJson = (url) => fetch(url, {cache: "no-store", signal: AbortSignal.timeout(15000)})
+    .then((response) => (response.ok ? response.json() : null))
+    .catch(() => null);
+// The same-origin status file decides when to reload: it changes only after the new site is deployed.
+// The query string bypasses the Pages cache.
+const publishedStatus = () => fetchJson(`status.json?t=${Date.now()}`);
+// The public GitHub API only adds progress and failure messages; it may be rate-limited.
+const latestRun = () => fetchJson(uploadForm.dataset.runsUrl).then((answer) => answer?.workflow_runs?.[0] ?? null);
 
 let watching = false;
-async function watchRecalculation(since) {
+async function watchRecalculation(publishedAt, previousRunId) {
     if (watching) return;
     watching = true;
     const started = Date.now();
     while (Date.now() - started < 20 * 60 * 1000) {
-        const run = await latestRun().catch(() => null);
-        if (run && Date.parse(run.created_at) >= since) {
+        const status = await publishedStatus();
+        if (status && status.at !== publishedAt) {
+            location.replace(`${location.pathname}?updated=${encodeURIComponent(status.at)}${location.hash}`);
+            return;
+        }
+        const run = await latestRun();
+        if (run && run.id !== previousRunId) {
             if (run.status !== "completed") {
                 showStatus("Идёт пересчёт по новой выгрузке. Страница обновится сама через 2–3 минуты.", "progress");
-            } else if (run.conclusion === "success") {
-                location.replace(`${location.pathname}?updated=${run.id}${location.hash}`);
-                return;
-            } else {
+            } else if (run.conclusion !== "success") {
                 showStatus("Пересчёт завершился ошибкой. На портале остаётся прежний план. "
                     + "Сообщите ответственному за систему.", "error");
                 watching = false;
                 return;
             }
         }
-        await pause(15000);
+        await pause(10000);
     }
     showStatus("Пересчёт идёт дольше обычного. Обновите страницу позже.", "error");
     watching = false;
@@ -312,7 +317,7 @@ uploadForm.addEventListener("submit", async (event) => {
     for (const [name, file] of matched) body.append(name, file, `${name}.csv`);
     uploadButton.disabled = true;
     uploadResult.textContent = "Загружаем файлы. Это займёт до минуты.";
-    const since = Date.now() - 2 * 60 * 1000;
+    const [published, previousRun] = await Promise.all([publishedStatus(), latestRun()]);
     try {
         const response = await fetch(uploadForm.action, {method: "POST", body});
         const answer = await response.json().catch(() => ({}));
@@ -320,7 +325,7 @@ uploadForm.addEventListener("submit", async (event) => {
             uploadResult.textContent = "Эта выгрузка уже на портале: пересчитывать нечего.";
         } else if (response.ok && answer.ok) {
             uploadResult.textContent = "Файлы приняты. Идёт пересчёт, страница обновится сама через 2–3 минуты.";
-            watchRecalculation(since);
+            watchRecalculation(published?.at, previousRun?.id);
         } else if (answer.missing) {
             uploadResult.textContent = `Не хватает файлов: ${answer.missing.trim().split(" ").join(", ")}.`;
         } else {
@@ -334,15 +339,15 @@ uploadForm.addEventListener("submit", async (event) => {
 });
 
 (async () => {
-    const status = await fetch("status.json", {cache: "no-store"}).then((r) => (r.ok ? r.json() : null)).catch(() => null);
+    const status = await publishedStatus();
     if (status && !status.accepted) {
         showStatus(`Загрузка ${formatTime(status.at)} отклонена: ${status.reasons.join(" ")} `
             + `На портале остаётся план по данным на ${formatDay(status.cutoff)}.`, "error");
     } else if (new URLSearchParams(location.search).has("updated")) {
         showStatus("Готово: план пересчитан по новой выгрузке.", "ok");
     }
-    const run = await latestRun().catch(() => null);
-    if (run && run.status !== "completed") watchRecalculation(Date.parse(run.created_at));
+    const run = await latestRun();
+    if (run && run.status !== "completed") watchRecalculation(status?.at, null);
 })();
 //]]>
 """
