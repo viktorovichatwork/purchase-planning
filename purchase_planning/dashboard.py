@@ -348,8 +348,12 @@ uploadForm.addEventListener("submit", async (event) => {
     } else if (new URLSearchParams(location.search).has("updated")) {
         showStatus("Готово: план пересчитан по новой выгрузке.", "ok");
     }
+    // A run that started before the published status is the one already shown here: its final checks
+    // may still be running after the new site is deployed, so only a later run means a pending upload.
     const run = await latestRun();
-    if (run && run.status !== "completed") watchRecalculation(status?.at, null);
+    const pending = run && run.status !== "completed"
+        && (!status || Date.parse(run.created_at) > Date.parse(status.at));
+    if (pending) watchRecalculation(status?.at, null);
 })();
 //]]>
 """
