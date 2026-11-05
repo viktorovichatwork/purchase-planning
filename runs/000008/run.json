@@ -1,0 +1,26 @@
+{
+  "code_revision": "cfedcaff03a02545258423012c04d04746c11fbc",
+  "input_sha256": "10e3639a3d06000b1908f2489cd88ec50782f6d998467b7e7efc232dbad6f499",
+  "llm": {
+    "discarded_by_reason": {
+      "llm_budget": 279
+    },
+    "discarded_skus": 279,
+    "explained_skus": 0,
+    "first_invalid_response": null,
+    "http_429_errors": [
+      {
+        "code": "insufficient_quota",
+        "type": "insufficient_quota"
+      }
+    ],
+    "rejected_items": 0,
+    "stop_reason": "исчерпан бюджет LLM",
+    "summary_status": "no_changes",
+    "truncated_responses": 0
+  },
+  "run_date": "2026-11-05",
+  "source_revision": "cfedcaff03a02545258423012c04d04746c11fbc",
+  "started_at": "2026-11-05T07:09:32.592132+00:00",
+  "workflow_run": "41985229992"
+}
