@@ -146,7 +146,14 @@ def test_dashboard_matches_workbook_and_displays_facts(tmp_path):
     assert page.find(".//header//a[@href='#upload']").text == "Обновить выгрузку ERP"
     upload = page.find(".//section[@id='upload']")
     assert page.find(".//section[@id='guide']//a[@href='#upload']") is not None
-    assert any(link.get("href", "").endswith("/tree/main/inbox") for link in upload.findall(".//a"))
+    form = upload.find(".//form[@id='upload-form']")
+    assert form.get("action").startswith("https://hook.") and form.get("enctype") == "multipart/form-data"
+    assert form.get("data-tables").split() == list(REQUIRED_COLUMNS)
+    assert form.find(".//input[@type='file']").get("multiple") is not None
+    assert form.find(".//button[@type='submit']").get("disabled") is not None
+    assert "/actions/workflows/publish.yml/runs" in form.get("data-runs-url")
+    assert page.find(".//header/p[@id='upload-status']").get("hidden") is not None
+    assert not any("/tree/main/inbox" in link.get("href", "") for link in upload.findall(".//a"))
     guide_files = {node.text for node in upload.findall(".//code")}
     assert {name for name in guide_files if name.endswith(".csv")} == {f"{name}.csv" for name in REQUIRED_COLUMNS}
     assert "export_meta.json" not in "".join(upload.itertext())

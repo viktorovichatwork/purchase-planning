@@ -23,6 +23,11 @@ from purchase_planning.planner import calculate
 from purchase_planning.report import write_report
 from purchase_planning.sku_labels import load_sku_labels
 
+# Upload status shown on the portal (ADR 0007): the outcome of the latest export, kept beside the run history.
+STATUS_FILENAME = "status.json"
+# Exit code of a rejected export: the site with the previous plan and the rejection reason is still published.
+REJECTED_EXIT = 3
+
 
 def _read_json(path: Path):
     return json.loads(path.read_text(encoding="utf-8"))
@@ -86,7 +91,21 @@ def _build_site(history: Path, site: Path) -> None:
         entries.append((f"{run.name}/index.html", run.name, _read_json(run / "facts.json")["cutoff"]))
     for filename in ("index.html", "report.xlsx"):
         copyfile(runs[0] / filename, site / filename)
+    if (history / STATUS_FILENAME).is_file():
+        copyfile(history / STATUS_FILENAME, site / STATUS_FILENAME)
     _history_page(entries[1:], site / "history.html")
+
+
+def _write_status(history: Path, *, accepted: bool, reasons: tuple[str, ...] = ()) -> None:
+    runs = _runs(history)
+    published = runs[0] if runs else None
+    _write_json(history / STATUS_FILENAME, {
+        "accepted": accepted,
+        "at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "reasons": list(reasons),
+        "run": published.name if published else None,
+        "cutoff": _read_json(published / "facts.json")["cutoff"] if published else None,
+    })
 
 
 def run_plan(
@@ -107,8 +126,9 @@ def run_plan(
                 if path != previous:
                     raise ValueError("У этого запуска уже есть более свежий преемник.")
                 return path
-        if reject_duplicate and any(run.get("input_sha256") == input_hash for _, run in metadata):
-            raise ExportValidationError(["Такая выгрузка уже была обработана. Для пересчёта запустите workflow вручную."])
+        # Only the export already on the portal is a duplicate: re-uploading an older one is a rollback (ADR 0007).
+        if reject_duplicate and metadata and metadata[0][1].get("input_sha256") == input_hash:
+            raise ExportValidationError(["Эта выгрузка уже на портале, план по ней не изменится."])
     old_facts = _read_json(previous / "facts.json") if previous else None
     old_rows = old_facts["recommendations"] if old_facts else []
 
@@ -168,6 +188,7 @@ def run_plan(
                 [(f"../{previous.name}/index.html", previous.name, old_facts["cutoff"])], staging / "history.html",
             )
         staging.rename(result)
+    _write_status(history, accepted=True)
     return result
 
 
@@ -191,7 +212,16 @@ def main() -> int:
         )
         if args.site_dir:
             _build_site(result.parent, args.site_dir)
-    except (ExportValidationError, OSError, ValueError, KeyError, TypeError) as error:
+    except ExportValidationError as error:
+        print(f"Запуск прерван. {error}", file=sys.stderr)
+        history = args.history_dir.resolve()
+        if not args.site_dir or not history.is_dir() or not _runs(history):
+            return 1
+        _write_status(history, accepted=False, reasons=error.reasons)
+        _build_site(history, args.site_dir)
+        print("На портале остаётся прежний план, причина отказа опубликована.", file=sys.stderr)
+        return REJECTED_EXIT
+    except (OSError, ValueError, KeyError, TypeError) as error:
         print(f"Запуск прерван. {error}", file=sys.stderr)
         return 1
     diff = _read_json(result / "diff.json")

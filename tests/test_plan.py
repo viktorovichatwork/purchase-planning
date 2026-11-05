@@ -18,7 +18,7 @@ from purchase_planning.actions import Action, action
 from purchase_planning.facts import ESTIMATED_CUTOFF_SOURCE, TYPICAL_TIMING_FLAG, OrderFlag, Segment
 from purchase_planning.order_sheet import open_orders_text
 from purchase_planning.planner import calculate
-from purchase_planning.runs import run_plan
+from purchase_planning.runs import REJECTED_EXIT, STATUS_FILENAME, main as runs_main, run_plan
 
 
 @pytest.fixture
@@ -67,12 +67,14 @@ def test_publication_retains_history_and_rejects_bad_exports(export, monkeypatch
     first = publish("site-1", "--reject-duplicate")
     assert first.returncode == 0, first.stderr
     assert publish("site-retry", "--reject-duplicate").returncode == 0
-    assert len(list(history.iterdir())) == 1
+    assert [path.name for path in history.iterdir() if path.is_dir()] == ["000001"]
 
     monkeypatch.setenv("GITHUB_RUN_ID", "2")
     duplicate = publish("site-duplicate", "--reject-duplicate")
-    assert duplicate.returncode != 0
-    assert not (export / "site-duplicate").exists()
+    assert duplicate.returncode == REJECTED_EXIT
+    assert json.loads((export / "site-duplicate" / STATUS_FILENAME).read_text(encoding="utf-8"))["reasons"] == [
+        "Эта выгрузка уже на портале, план по ней не изменится.",
+    ]
 
     second = publish("site-2")
     assert second.returncode == 0, second.stderr
@@ -94,10 +96,11 @@ def test_publication_retains_history_and_rejects_bad_exports(export, monkeypatch
     monkeypatch.setenv("GITHUB_RUN_ID", "3")
     (export / "sales_monthly.csv").write_text("", encoding="utf-8")
     bad_export = publish("site-invalid", "--reject-duplicate")
-    assert bad_export.returncode != 0
-    assert not (export / "site-invalid").exists()
+    assert bad_export.returncode == REJECTED_EXIT
     assert not (history / "000003").exists()
-    assert (site / "index.html").read_text(encoding="utf-8") == page
+    assert (export / "site-invalid" / "index.html").read_text(encoding="utf-8") == page
+    status = json.loads((export / "site-invalid" / STATUS_FILENAME).read_text(encoding="utf-8"))
+    assert (status["accepted"], status["run"], status["reasons"]) == (False, "000002", ["sales_monthly.csv: файл пуст."])
 
 
 @pytest.mark.parametrize(
@@ -1252,3 +1255,48 @@ def test_change_count_follows_action_groups():
         change(None, "К закупке"),
     ])
     assert counts.segments == 2
+
+
+def _run_cli(monkeypatch, *args: object) -> int:
+    monkeypatch.setattr(sys, "argv", ["runs", *map(str, args)])
+    return runs_main()
+
+
+def test_rejected_export_republishes_previous_plan_with_reason(export, tmp_path, monkeypatch):
+    history = tmp_path / "history"
+    first = run_plan(export, history, stub_llm=True)
+    assert json.loads((history / STATUS_FILENAME).read_text(encoding="utf-8"))["accepted"] is True
+    (export / "stock_monthly.csv").write_text("", encoding="utf-8")
+
+    site = tmp_path / "site"
+    assert _run_cli(monkeypatch, export, "--history-dir", history, "--site-dir", site, "--stub-llm") == REJECTED_EXIT
+
+    status = json.loads((site / STATUS_FILENAME).read_text(encoding="utf-8"))
+    assert status["accepted"] is False
+    assert status["reasons"] == ["stock_monthly.csv: файл пуст."]
+    assert (status["run"], status["cutoff"]) == (first.name, "2026-08-13")
+    assert (site / "index.html").read_bytes() == (first / "index.html").read_bytes()
+    assert [path.name for path in history.iterdir() if path.is_dir()] == [first.name]
+
+
+def test_rejected_first_export_publishes_nothing(export, tmp_path, monkeypatch):
+    (export / "stock_monthly.csv").write_text("", encoding="utf-8")
+    site = tmp_path / "site"
+    assert _run_cli(monkeypatch, export, "--history-dir", tmp_path / "history", "--site-dir", site) == 1
+    assert not site.exists()
+
+
+def test_only_the_published_export_is_a_duplicate(export, tmp_path):
+    history = tmp_path / "history"
+    original = {path.name: path.read_bytes() for path in export.iterdir() if path.is_file()}
+    run_plan(export, history, stub_llm=True, reject_duplicate=True)
+    with pytest.raises(ExportValidationError, match="уже на портале"):
+        run_plan(export, history, stub_llm=True, reject_duplicate=True)
+
+    with (export / "receipts.csv").open("a", encoding="utf-8") as source:
+        source.write("SKU-1,2026-08-10,10,SUP-1,import\n")
+    run_plan(export, history, stub_llm=True, reject_duplicate=True)
+    for name, content in original.items():
+        (export / name).write_bytes(content)
+    rollback = run_plan(export, history, stub_llm=True, reject_duplicate=True)
+    assert rollback.name == "000003"
