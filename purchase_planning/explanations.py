@@ -170,7 +170,7 @@ def _requests[T](
     kind: str, entries: dict[str, T], complete: Completion, stats: ExplanationStats, *, split: bool = True,
 ) -> Iterator[tuple[dict[str, T], object, str | None]]:
     max_tokens = 512 + len(entries) * (512 if kind == "rows" else 192)
-    context = {kind: entries}
+    context: dict[str, object] = {kind: entries}
     reply = complete(context, max_tokens)
     for error in reply.http_429_errors:
         if error not in stats.http_429_errors:

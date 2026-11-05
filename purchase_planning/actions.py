@@ -124,9 +124,9 @@ def decision_points(row: Recommendation) -> tuple[tuple[str, str], ...]:
         if DecisionReason.TYPICAL_TIMING in reasons:
             timing = decision.typical_timing
             lead = f"{timing.lead_days} дн." if timing is not None and timing.lead_days is not None else ""
-            missing = "Поставщик не указан" if DecisionReason.MISSING_SUPPLIER in reasons else "Срок поставки неизвестен"
+            unknown = "Поставщик не указан" if DecisionReason.MISSING_SUPPLIER in reasons else "Срок поставки неизвестен"
             points.append((
-                f"{missing}. Количество посчитано по типичному сроку поставки {lead}",
+                f"{unknown}. Количество посчитано по типичному сроку поставки {lead}",
                 "Назначить поставщика и проверить количество",
             ))
         checked, missing = row.checked_stock_months, row.missing_stock_months

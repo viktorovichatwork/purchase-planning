@@ -2,7 +2,7 @@ from calendar import monthrange
 from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import date, timedelta
-from math import ceil, floor, fsum, isclose
+from math import ceil, floor, isclose
 
 from purchase_planning.facts import CategoryProfile
 

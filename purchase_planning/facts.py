@@ -212,6 +212,12 @@ class PlanFacts:
     backtest_warning: str | None = None
     unconfirmed_order_lines: int = 0
     typical_timing: SupplierTiming | None = None
+    today: date | None = None
+
+    @property
+    def order_from(self) -> date:
+        """The earliest day an order can be placed. A deadline before it reads «Сейчас»: nobody orders retroactively."""
+        return max(self.as_of, self.today) if self.today else self.as_of
 
     @property
     def cutoff_is_estimated(self) -> bool:

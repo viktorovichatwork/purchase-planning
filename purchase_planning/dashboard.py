@@ -1,5 +1,6 @@
 from collections import Counter, defaultdict
 from collections.abc import Iterable, Mapping
+from dataclasses import replace
 from datetime import date, timedelta
 from html import escape
 from pathlib import Path
@@ -8,6 +9,7 @@ from purchase_planning import segments
 from purchase_planning.actions import (
     ACTION_HINTS, Action, SkipReason, action, decision_points, skip_reason, todo_text, why_text,
 )
+from purchase_planning.calibration import METRIC_HEADERS, METRIC_HINTS
 from purchase_planning.comparison import Change, summarize
 from purchase_planning.explanations import Explanations
 from purchase_planning.export import REQUIRED_COLUMNS
@@ -60,6 +62,7 @@ _COLUMN_HINTS = {
                             "проданным штукам. Так же её считает ERP в справочнике товаров. Пусто — себестоимость "
                             "не проставлена ни для одной продажи.",
     "Продано за 12 мес, шт.": "Сколько штук продано за 12 полных месяцев и текущий неполный месяц.",
+    **METRIC_HINTS,
 }
 _FLAG_HINTS = {
     OrderFlag.STUCK: "Плановая дата прихода прошла, а товар не пришёл. Заказ в расчёт не берётся. "
@@ -286,7 +289,7 @@ def _sku(
             "Дольше горизонта" if row.coverage_months is not None else "Нет прогноза"
         )),
         ("Заказать не позже", order_date_label(
-            row.order_by, facts.as_of, date_format="%d.%m.%Y", below_reorder_point=stock_below_reorder_point(row),
+            row.order_by, facts.order_from, date_format="%d.%m.%Y", below_reorder_point=stock_below_reorder_point(row),
         ) if row.order_by else "—"),
         ("Покрытие, мес", coverage_text(row)),
         ("Что делать", action(row)),
@@ -331,7 +334,7 @@ def _order_table(
 ) -> str:
     rows = []
     for schedule in schedules:
-        as_of = facts.as_of
+        as_of = facts.order_from
         when = order_date_label(schedule.deadline, as_of, date_format="%d.%m.%Y", below_reorder_point=schedule.low_stock)
         if not schedule.supplier_id:
             when = "после того, как закупщик назначит поставщика"
@@ -344,7 +347,8 @@ def _order_table(
             if deadline <= as_of:
                 batch_date = "Сейчас"
             batch_lines.append(f'<span class="batch">{label} — {batch_date} — {quantity} шт.</span>')
-        ordinary, conditional = [], []
+        ordinary: list[str] = []
+        conditional: list[str] = []
         for row in schedule.lines:
             target = conditional if action(row) == Action.DECIDE else ordinary
             target.append(_sku(row, facts, explanations.get(row.sku_id, ""), schedule.flags, labels))
@@ -429,24 +433,30 @@ def _excess(facts: PlanFacts, labels: Mapping[str, str]) -> str:
 def _seasons(facts: PlanFacts, labels: Mapping[str, str], summary: PlanSummary) -> str:
     groups: dict[tuple[date, str, str], list[Recommendation]] = defaultdict(list)
     for row in facts.recommendations:
-        if deadline := season_deadline(row, facts.as_of):
+        if deadline := season_deadline(row, facts.order_from):
             groups[deadline, row.supplier_id, row.category].append(row)
     if not groups:
         return "<p>Нет позиций.</p>"
     sections = []
     for (deadline, supplier, category), skus in sorted(groups.items()):
+        historical = deadline < facts.order_from
+        deadline_label = f"Исторический срок — {_date(deadline)}" if historical else _date(deadline)
         heading = " · ".join(escape(part) for part in (
-            _date(deadline), supplier or "Поставщик не указан", category_name(category), f"{len(skus)} SKU",
+            deadline_label, supplier or "Поставщик не указан", category_name(category), f"{len(skus)} SKU",
         ) if part)
+        warning = (
+            '<p class="meta">Этот срок уже прошёл. Количества ниже рассчитаны по старым данным. '
+            'Для актуального сезонного плана загрузите свежую выгрузку ERP.</p>'
+        ) if historical else ""
         items = []
         for row in sorted(skus, key=lambda row: row.sku_id):
             season = row.seasonal_order
-            soon = season_order_soon(row, facts.as_of)
+            soon = season_order_soon(row, facts.order_from)
             if season and season.actionable:
                 status = f"Сезонная партия — {rounded_quantity(season.order_qty, row.order_multiple)} шт."
                 if soon:
                     status += f" · заказать в ближайшие {days_text(SEASON_SOON_DAYS)}"
-                elif season.deadline < facts.as_of:
+                elif season.deadline < facts.order_from:
                     status += " · срок прошёл, решить закупщику"
             else:
                 status = (
@@ -460,7 +470,7 @@ def _seasons(facts: PlanFacts, labels: Mapping[str, str], summary: PlanSummary) 
             )
         entries = _browse(f'<ul class="skus season-skus" data-entries="">{"".join(items)}</ul>')
         search = _search_key(supplier, category_name(category))
-        sections.append(f'<details data-search="{search}"><summary>{heading}</summary>{entries}</details>')
+        sections.append(f'<details data-search="{search}"><summary>{heading}</summary>{warning}{entries}</details>')
     seasonal = sorted(
         (profile for profile in facts.category_profiles if profile.is_seasonal), key=lambda profile: profile.season_window,
     )
@@ -474,10 +484,11 @@ def _seasons(facts: PlanFacts, labels: Mapping[str, str], summary: PlanSummary) 
         f"годового объёма. Сейчас это: {escape(windows)}. Остальные категории продаются ровнее и заказываются обычным циклом.</p>"
         '<p class="meta">Под сезон заказ размещается один раз, заранее: крайний срок = начало сезона минус срок поставки '
         "поставщика. У разных поставщиков срок поставки разный, поэтому одна категория может стоять в нескольких группах — "
-        "одна группа = один заказ одному поставщику. Если срок этого сезона уже прошёл, показан срок на следующий год. "
+        "одна группа = один заказ одному поставщику. Если срок этого сезона уже прошёл, показан сохранённый срок "
+        "следующего сезона. Если прошёл и он, группа помечена «Исторический срок»: для актуального плана нужны свежие данные. "
         "Раскройте группу, чтобы увидеть товары.</p>"
         f'<p class="meta">Всего в списке {_number(sum(map(len, groups.values())))} SKU. Нужен сезонный заказ в ближайшие '
-        f"{days_text(SEASON_SOON_DAYS)}, до {_date(facts.as_of + timedelta(days=SEASON_SOON_DAYS))}, — у "
+        f"{days_text(SEASON_SOON_DAYS)}, до {_date(facts.order_from + timedelta(days=SEASON_SOON_DAYS))}, — у "
         f"{_number(summary.season_soon)} SKU. Эти товары отмечены в списке; товары без сезонной партии в показатель не входят.</p>"
     )
     return intro + _browse(
@@ -490,7 +501,7 @@ _MONTHS = ("январь", "февраль", "март", "апрель", "май
 
 def _calendar(facts: PlanFacts, orders: OrderPlan) -> str:
     labels = ("янв.", "февр.", "март", "апр.", "май", "июнь", "июль", "авг.", "сент.", "окт.", "нояб.", "дек.")
-    as_of = facts.as_of
+    as_of = facts.order_from
     first = as_of.year * 12 + as_of.month - 1
     counts: Counter[int] = Counter()
     for row in facts.recommendations:
@@ -563,8 +574,8 @@ def _skip(facts: PlanFacts, labels: Mapping[str, str], summary: PlanSummary) -> 
         rows = lists[reason]
         if reason == SkipReason.NO_SALES:
             rows.sort(key=lambda row: (-row.stock_at_calculation, row.sku_id))
-            headers = ("SKU", "Поставщик", "Остаток, шт.", "Почему", "Что сделать")
-            values = (
+            headers: tuple[str, ...] = ("SKU", "Поставщик", "Остаток, шт.", "Почему", "Что сделать")
+            values: Iterable[tuple[object, ...]] = (
                 (row.sku_id, row.supplier_id or "Поставщик не указан", round(row.stock_at_calculation),
                  why_text(row), todo_text(row))
                 for row in rows
@@ -635,7 +646,7 @@ def _backtest_quality(facts: PlanFacts) -> str:
     )
     breakdown = _table(
         "Бэктест по группам",
-        ("Разрез", "Группа", "Окон", "WAPE", "Смещение", "WAPE среднего за 12 мес", "Смещение среднего за 12 мес"),
+        METRIC_HEADERS,
         ((row.breakdown, row.group, row.windows, *(
             f"{_decimal(value * 100)}%" if value is not None else "—"
             for value in (row.wape, row.bias, row.baseline_wape, row.baseline_bias)
@@ -649,6 +660,7 @@ def write_dashboard(
     explanations: Explanations | None = None,
     sku_labels: Mapping[str, str] | None = None,
 ) -> None:
+    facts = replace(facts, today=run_date)
     age = (run_date - facts.cutoff).days
     stale = age > STALE_EXPORT_DAYS
     status = STALE_EXPORT_STATUS if stale else "Актуально"

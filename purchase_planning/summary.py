@@ -17,7 +17,7 @@ SEASON_SOON_DAYS = 90
 
 
 def season_deadline(row: Recommendation, as_of: date) -> date | None:
-    """The seasonal order-by date the buyer still can meet: this season's, or next year's once it has passed."""
+    """Select a stored season deadline; the portal marks it historical if both stored dates have passed."""
     season = row.seasonal_order
     if season is None:
         return None
@@ -66,7 +66,7 @@ class Tile:
 
 
 def plan_summary(facts: PlanFacts, orders: OrderPlan | None = None) -> PlanSummary:
-    as_of = facts.as_of
+    as_of = facts.order_from
     soon_until = as_of + timedelta(days=ORDER_SOON_DAYS)
     orders = prepare_orders(facts) if orders is None else orders
     now = soon = later = not_needed = units = 0

@@ -102,7 +102,7 @@ def prepare_orders(facts: PlanFacts) -> OrderPlan:
     groups: dict[str, list[Recommendation]] = defaultdict(list)
     for row in facts.recommendations:
         summary = summaries.get(row.supplier_id)
-        batches = tuple(_order_batches(row, summary.next_order_date if summary else None, facts.as_of))
+        batches = tuple(_order_batches(row, summary.next_order_date if summary else None, facts.order_from))
         batches_by_sku[row.sku_id] = batches
         if batches:
             groups[row.supplier_id].append(row)
@@ -112,6 +112,6 @@ def prepare_orders(facts: PlanFacts) -> OrderPlan:
         batches = tuple(batch for row in lines for batch in batches_by_sku[row.sku_id])
         summary = summaries.get(supplier)
         suppliers.append(SupplierSchedule(
-            supplier, lines, batches, summary.timing.flags if summary else (), facts.as_of,
+            supplier, lines, batches, summary.timing.flags if summary else (), facts.order_from,
         ))
     return OrderPlan(batches_by_sku, tuple(sorted(suppliers, key=lambda item: (item.deadline, item.supplier_id))))
