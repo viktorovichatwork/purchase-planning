@@ -1,5 +1,5 @@
 ---
-status: accepted
+status: accepted (способ загрузки уточнён в ADR 0007)
 ---
 
 # Пилот: заказчик загружает выгрузку на GitHub, расчёт идёт в GitHub Actions, результат публикуется на GitHub Pages

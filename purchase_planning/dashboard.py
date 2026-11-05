@@ -32,6 +32,12 @@ from purchase_planning.wording import days_text, plural
 
 
 _REPOSITORY_URL = "https://github.com/viktorovichatwork/purchase-planning"
+# Upload form and progress polling (ADR 0007): the Make webhook commits the six CSV to inbox/ of main;
+# the push starts the publish workflow, whose latest run the page polls through the public GitHub API.
+_UPLOAD_URL = "https://hook.us1.make.com/s61yvcvbcciqgad773xol5np91hzgzk4"
+_RUNS_API_URL = (
+    "https://api.github.com/repos/viktorovichatwork/purchase-planning/actions/workflows/publish.yml/runs?per_page=1"
+)
 _INVENTORY_HINTS = {
     "Покрытие 6–12 мес": "По прогнозу остатка и ожидаемых поставок хватит от 6 до 12 месяцев.",
     "Избыток": "Остаток и товар в пути превышают порог запаса для этой позиции. "
@@ -206,6 +212,137 @@ for (const link of [...links, ...document.querySelectorAll("[data-view-link]")])
 }
 window.addEventListener("hashchange", () => showView()?.scrollIntoView());
 showView()?.scrollIntoView();
+//]]>
+"""
+_UPLOAD_SCRIPT = """
+//<![CDATA[
+const uploadForm = document.getElementById("upload-form");
+const uploadStatus = document.getElementById("upload-status");
+const uploadInput = uploadForm.querySelector("input[type=file]");
+const uploadButton = uploadForm.querySelector("button");
+const uploadList = document.getElementById("upload-files-list");
+const uploadResult = document.getElementById("upload-result");
+const tables = uploadForm.dataset.tables.split(" ");
+const formatTime = (iso) => new Date(iso).toLocaleString("ru-RU", {dateStyle: "short", timeStyle: "short"});
+const formatDay = (iso) => iso.split("-").reverse().join(".");
+const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+function showStatus(text, kind) {
+    uploadStatus.textContent = text;
+    uploadStatus.dataset.kind = kind;
+    uploadStatus.hidden = false;
+}
+
+async function latestRun() {
+    const response = await fetch(uploadForm.dataset.runsUrl, {cache: "no-store"});
+    if (!response.ok) return null;
+    return (await response.json()).workflow_runs?.[0] ?? null;
+}
+
+let watching = false;
+async function watchRecalculation(since) {
+    if (watching) return;
+    watching = true;
+    const started = Date.now();
+    while (Date.now() - started < 20 * 60 * 1000) {
+        const run = await latestRun().catch(() => null);
+        if (run && Date.parse(run.created_at) >= since) {
+            if (run.status !== "completed") {
+                showStatus("Идёт пересчёт по новой выгрузке. Страница обновится сама через 2–3 минуты.", "progress");
+            } else if (run.conclusion === "success") {
+                location.replace(`${location.pathname}?updated=${run.id}${location.hash}`);
+                return;
+            } else {
+                showStatus("Пересчёт завершился ошибкой. На портале остаётся прежний план. "
+                    + "Сообщите ответственному за систему.", "error");
+                watching = false;
+                return;
+            }
+        }
+        await pause(15000);
+    }
+    showStatus("Пересчёт идёт дольше обычного. Обновите страницу позже.", "error");
+    watching = false;
+}
+
+function chosenFiles() {
+    const matched = new Map();
+    const problems = [];
+    for (const file of uploadInput.files) {
+        const table = tables.find((name) => file.name.toLowerCase().includes(name));
+        if (!table) problems.push(`${file.name} не похож ни на одну таблицу выгрузки`);
+        else if (matched.has(table)) problems.push(`для ${table}.csv выбрано два файла`);
+        else matched.set(table, file);
+    }
+    const missing = tables.filter((name) => !matched.has(name)).map((name) => `${name}.csv`);
+    if (missing.length) problems.push(`не хватает: ${missing.join(", ")}`);
+    return {matched, problems, missing};
+}
+
+const wholeExport = "Нужны все шесть файлов из одной выгрузки ERP. Таблицы связаны датой: если взять свежие продажи "
+    + "и старые остатки, система посчитает, что на складе больше товара, чем есть, и предложит заказать меньше. "
+    + "Выгрузите из ERP все шесть таблиц за один раз и загрузите их вместе.";
+
+function selectionMessage({problems, missing}) {
+    if (!problems.length) return "Все шесть файлов на месте.";
+    return `Исправьте выбор: ${problems.join("; ")}.` + (missing.length ? ` ${wholeExport}` : "");
+}
+
+uploadInput.addEventListener("change", () => {
+    const selection = chosenFiles();
+    uploadList.replaceChildren(...tables.map((name) => {
+        const item = document.createElement("li");
+        item.textContent = `${name}.csv — ${selection.matched.has(name) ? selection.matched.get(name).name : "не выбран"}`;
+        return item;
+    }));
+    uploadResult.textContent = selectionMessage(selection);
+    uploadButton.disabled = selection.problems.length > 0;
+});
+
+uploadForm.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const selection = chosenFiles();
+    const {matched, problems} = selection;
+    if (problems.length) {
+        uploadResult.textContent = selectionMessage(selection);
+        return;
+    }
+    const body = new FormData();
+    for (const [name, file] of matched) body.append(name, file, `${name}.csv`);
+    uploadButton.disabled = true;
+    uploadResult.textContent = "Загружаем файлы. Это займёт до минуты.";
+    const since = Date.now() - 2 * 60 * 1000;
+    try {
+        const response = await fetch(uploadForm.action, {method: "POST", body});
+        const answer = await response.json().catch(() => ({}));
+        if (response.ok && answer.changed === false) {
+            uploadResult.textContent = "Эта выгрузка уже на портале: пересчитывать нечего.";
+        } else if (response.ok && answer.ok) {
+            uploadResult.textContent = "Файлы приняты. Идёт пересчёт, страница обновится сама через 2–3 минуты.";
+            watchRecalculation(since);
+        } else if (answer.missing) {
+            uploadResult.textContent = `Не хватает файлов: ${answer.missing.trim().split(" ").join(", ")}.`;
+        } else {
+            uploadResult.textContent = "Не удалось загрузить файлы. Попробуйте ещё раз через минуту.";
+        }
+    } catch {
+        uploadResult.textContent = "Не удалось загрузить файлы. Проверьте соединение и попробуйте ещё раз.";
+    } finally {
+        uploadButton.disabled = chosenFiles().problems.length > 0;
+    }
+});
+
+(async () => {
+    const status = await fetch("status.json", {cache: "no-store"}).then((r) => (r.ok ? r.json() : null)).catch(() => null);
+    if (status && !status.accepted) {
+        showStatus(`Загрузка ${formatTime(status.at)} отклонена: ${status.reasons.join(" ")} `
+            + `На портале остаётся план по данным на ${formatDay(status.cutoff)}.`, "error");
+    } else if (new URLSearchParams(location.search).has("updated")) {
+        showStatus("Готово: план пересчитан по новой выгрузке.", "ok");
+    }
+    const run = await latestRun().catch(() => null);
+    if (run && run.status !== "completed") watchRecalculation(Date.parse(run.created_at));
+})();
 //]]>
 """
 
@@ -710,6 +847,7 @@ def write_dashboard(
     freshness += '</div>'
     check_orders = '<a class="primary" href="#orders" data-view-link="">Проверить заказ по поставщикам</a>'
     csv_files = ", ".join(f"<code>{table}.csv</code>" for table in REQUIRED_COLUMNS)
+    tables = " ".join(REQUIRED_COLUMNS)
     path.write_text(
         f"""<!doctype html>
 <html lang="ru">
@@ -849,6 +987,13 @@ ul {{ margin: 0; padding-left: 1.25rem; }}
 .guide li a {{ display: inline; }}
 .upload-steps > li + li {{ margin-top: 1.15rem; }}
 .upload-steps h3 {{ margin: 0 0 .35rem; }}
+.upload-form {{ display: grid; gap: .5rem; justify-items: start; margin-top: .75rem; }}
+.upload-form input[type=file] {{ padding: .5rem; max-width: 100%; }}
+.upload-form button.primary {{ border: 0; }}
+.upload-form button:disabled {{ opacity: .6; cursor: default; }}
+.upload-status {{ flex-basis: 100%; margin: 0; padding: .65rem .9rem; border-radius: .5rem; max-width: none; }}
+.upload-status[data-kind="error"] {{ background: var(--draft-bg); color: var(--draft); }}
+.upload-status[data-kind="progress"], .upload-status[data-kind="ok"] {{ background: var(--subtle); color: var(--accent); }}
 @media (max-width: 40rem) {{
     h1 {{ font-size: 1.65rem; }}
     .decision {{ gap: 0 .6rem; }}
@@ -876,6 +1021,7 @@ ul {{ margin: 0; padding-left: 1.25rem; }}
 <a href="#guide">Как работать с порталом</a>
 </nav>
 {freshness if not stale else ""}
+<p id="upload-status" class="upload-status" role="status" hidden=""></p>
 {warnings}
 </header>
 <section id="overview"><h2>Сводка решения</h2>{overview}</section>
@@ -916,14 +1062,22 @@ ul {{ margin: 0; padding-left: 1.25rem; }}
 <li>
 <h3>Подготовьте шесть CSV</h3>
 <p>Возьмите свежую обезличенную выгрузку из ERP. Проверьте, что в ней есть {csv_files}.</p>
+<p>Все шесть таблиц выгружайте за один раз и загружайте вместе. Таблицы связаны датой: свежие продажи со старыми остатками исказят заказ, поэтому заменить одну таблицу нельзя.</p>
 </li>
 <li>
-<h3>Загрузите файлы в GitHub</h3>
-<p>Откройте <a href="{_REPOSITORY_URL}/tree/main/inbox">папку inbox ветки main</a> и выберите <strong>Add file → Upload files</strong>. Добавьте все шесть CSV с прежними именами. Нажмите <strong>Commit changes</strong>, чтобы сохранить их вместе в <code>main</code>. Нужен доступ на запись.</p>
+<h3>Загрузите файлы здесь</h3>
+<p>Выберите все шесть файлов сразу и нажмите «Загрузить и пересчитать». Имя файла может отличаться, главное — чтобы в нём было название таблицы, например «sales_monthly (1).csv». Загрузка заменяет все шесть таблиц и сохраняется в истории запусков.</p>
+<form id="upload-form" class="upload-form" action="{_UPLOAD_URL}" method="post" enctype="multipart/form-data" data-tables="{tables}" data-runs-url="{escape(_RUNS_API_URL, quote=True)}">
+<label class="search" for="upload-files">Шесть CSV из ERP
+<input id="upload-files" type="file" accept=".csv,text/csv" multiple="" required="" /></label>
+<ul id="upload-files-list" class="meta"></ul>
+<button class="primary" type="submit" disabled="">Загрузить и пересчитать</button>
+<p id="upload-result" class="meta" role="status"></p>
+</form>
 </li>
 <li>
-<h3>Проверьте результат</h3>
-<p>Откройте <a href="{_REPOSITORY_URL}/actions/workflows/publish.yml">страницу расчётов в GitHub Actions</a>. Когда новый запуск завершится успешно, обновите портал и сверьте дату данных под заголовком.</p>
+<h3>Дождитесь пересчёта</h3>
+<p>Пересчёт занимает 2–3 минуты, страница обновится сама. Сверьте дату данных под заголовком. Если выгрузку отклонят, под заголовком появится причина, а на портале останется прежний план. Ход расчёта виден и на <a href="{_REPOSITORY_URL}/actions/workflows/publish.yml">странице расчётов в GitHub Actions</a>.</p>
 <p>Даты в выгрузке нет. Портал определяет её сам: сравнивает продажи последнего, неполного месяца с обычными продажами за такой месяц. Например, продана примерно половина обычного — значит, данные на середину месяца.</p>
 </li>
 </ol>
@@ -932,6 +1086,7 @@ ul {{ margin: 0; padding-left: 1.25rem; }}
 </div>
 </main>
 <script>{_WORKSPACE_SCRIPT}</script>
+<script>{_UPLOAD_SCRIPT}</script>
 </body>
 </html>
 """,

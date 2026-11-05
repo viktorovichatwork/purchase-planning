@@ -60,8 +60,15 @@ jobs:
           if [[ "$GITHUB_EVENT_NAME" == push ]]; then
             options+=(--reject-duplicate)
           fi
+          status=0
           python -m purchase_planning.runs "$RUNNER_TEMP/export/inbox" \
-            --history-dir runs --site-dir "$RUNNER_TEMP/site" --refresh-backtest "${options[@]}"
+            --history-dir runs --site-dir "$RUNNER_TEMP/site" --refresh-backtest "${options[@]}" || status=$?
+          # 3: the export was rejected; the previous plan is republished with the reason (ADR 0007).
+          if [[ "$status" -eq 3 ]]; then
+            echo "::warning::Выгрузка отклонена. На портале остаётся прежний план, причина показана на портале."
+          elif [[ "$status" -ne 0 ]]; then
+            exit "$status"
+          fi
       - name: Сохранить историю
         run: |
           git add -- runs/
