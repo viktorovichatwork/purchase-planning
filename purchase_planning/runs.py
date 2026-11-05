@@ -17,7 +17,7 @@ from purchase_planning.dashboard import write_dashboard
 from purchase_planning.explanations import ExplanationStats, explain, gateway
 from purchase_planning.export import REQUIRED_COLUMNS, ExportValidationError
 from purchase_planning.facts import PlanFacts, Segment
-from purchase_planning.order_sheet import displayed_order_qty
+from purchase_planning.orders import displayed_order_qty
 from purchase_planning.parameters import llm_max_skus, run_parameters
 from purchase_planning.planner import calculate
 from purchase_planning.report import write_report

@@ -20,6 +20,18 @@ TYPICAL_TIMING_FLAG = "Срок поставки неизвестен: расч�
 TYPICAL_TIMING_SOURCE = "Типичный срок по всем поставщикам"
 
 
+class DecisionReason(StrEnum):
+    MISSING_COST = "missing_cost"
+    LOW_MARKUP = "low_markup"
+    LOW_DATA = "low_data"
+    MISSING_MARKUP = "missing_markup"
+    MISSING_SUPPLIER = "missing_supplier"
+    TYPICAL_TIMING = "typical_timing"
+    LONG_STOCKOUT = "long_stockout"
+    LATE_SEASON = "late_season"
+    SMALL_LATE_SEASON = "small_late_season"
+
+
 class OrderFlag(StrEnum):
     STUCK = "Опаздывает"
     TAIL = "Хвост заказа"
@@ -148,6 +160,8 @@ class Recommendation:
     regular_order_qty: float | None = None
     regular_order_date: date | None = None
     grouped_season_deadline: date | None = None
+    # None identifies older callers; new calculations always record their decision provenance.
+    decision: "DecisionFacts | None" = None
 
     @property
     def in_transit(self) -> float:
@@ -166,6 +180,13 @@ class SupplierTiming:
         if self.lead_days is None or self.cycle_days is None:
             return None
         return self.lead_days + self.cycle_days
+
+
+@dataclass(frozen=True)
+class DecisionFacts:
+    reasons: tuple[DecisionReason, ...]
+    markup_threshold: float
+    typical_timing: SupplierTiming | None = None
 
 
 @dataclass(frozen=True)

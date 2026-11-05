@@ -13,11 +13,11 @@ from tempfile import TemporaryDirectory
 
 from purchase_planning.calibration import BACKTEST_FILENAME
 from purchase_planning.demand import is_stockout_month
-from purchase_planning.export import ExportValidationError, read_export
+from purchase_planning.export import ExportValidationError
 from purchase_planning.facts import BacktestMetric, BacktestQuantiles, BacktestResult, DemandType
 from purchase_planning.inventory import month_shares
-from purchase_planning.planner import _read_cutoff, plan, read_monthly_history
-from purchase_planning.supply import read_supply_history
+from purchase_planning.planner import calculate_export
+from purchase_planning.prepared_export import prepare_export
 
 FIRST_ORIGIN = date(2024, 6, 30)
 BASELINE_MONTHS = 12
@@ -43,13 +43,9 @@ def _metrics(breakdown: str, group: str, windows: list[tuple[float, float, float
 
 
 def run_backtest(data_dir: str | Path) -> BacktestResult:
-    directory = Path(data_dir)
-    tables = read_export(directory)
-    sales_rows, stock, partial_months = read_monthly_history(tables)
-    orders, receipts = read_supply_history(tables)
-    cutoff, _ = _read_cutoff(
-        directory / "export_meta.json", sales_rows, partial_months, orders, receipts,
-    )
+    export = prepare_export(data_dir)
+    sales_rows, stock, partial_months = export.sales_rows, export.stock, export.partial_months
+    cutoff = export.cutoff
     net_sales: dict[tuple[str, date], float] = defaultdict(float)
     gross_sales: dict[tuple[str, date], float] = defaultdict(float)
     for sku, sale in sales_rows:
@@ -63,7 +59,7 @@ def run_backtest(data_dir: str | Path) -> BacktestResult:
     for origin in _month_ends(FIRST_ORIGIN, cutoff):
         if origin >= cutoff or origin in partial_months:
             continue
-        facts = plan(directory, origin)
+        facts = calculate_export(export, origin).facts
         recent_months = tuple(_month_ends(date(origin.year - 1, origin.month, 1), origin))[-BASELINE_MONTHS:]
         baseline_months = tuple(month for month in recent_months if month not in partial_months)
         horizons = {}

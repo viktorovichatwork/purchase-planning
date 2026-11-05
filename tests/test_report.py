@@ -1,4 +1,4 @@
-from datetime import date
+from datetime import date, timedelta
 
 import pytest
 from openpyxl import load_workbook
@@ -33,7 +33,7 @@ def test_order_sheet_uses_facts_and_marks_stale_exports(tmp_path, run_date, stat
         workbook.close()
 
 
-def test_order_sheet_prioritizes_due_suppliers_and_sums_rounded_lines(tmp_path):
+def test_order_sheet_prioritizes_earliest_batches_and_sums_rounded_lines(tmp_path):
     day = date(2026, 8, 13)
     timing = SupplierTiming(140, "История", 120, ("цикл ограничен (было 200 дней)",))
     facts = PlanFacts(
@@ -44,7 +44,9 @@ def test_order_sheet_prioritizes_due_suppliers_and_sums_rounded_lines(tmp_path):
             Recommendation("SKU-3", "SUP-B", 5.1, segment=Segment.CONDITIONAL),
             Recommendation("SKU-4", "SUP-B", 0),
         ),
-        suppliers=(SupplierSummary("SUP-A", timing, 12, False), SupplierSummary("SUP-B", timing, 2.1, True)),
+        # The old cycle-lookahead flag must not take priority over the actual deadline.
+        suppliers=(SupplierSummary("SUP-A", timing, 12, True, day + timedelta(days=10)),
+                   SupplierSummary("SUP-B", timing, 2.1, True, day + timedelta(days=2))),
     )
     path = tmp_path / "order.xlsx"
     write_report(facts, path, run_date=day)
@@ -57,6 +59,8 @@ def test_order_sheet_prioritizes_due_suppliers_and_sums_rounded_lines(tmp_path):
             ("SUP-A", "SKU-1", 12), ("SUP-A", "Итого", 12),
         ]
         assert rows[0][header.index("Флаги поставщика")] == timing.flags[0]
+        assert rows[0][header.index("Дата заказа у поставщика")] == "2026-08-15"
+        assert rows[0][header.index("Пора заказывать у поставщика")] == "Нет"
         assert facts.recommendations[2].order_qty == 5.1
         for name in ("Заказ по поставщикам", "Решить закупщику", "Не заказывать"):
             target = workbook[name]

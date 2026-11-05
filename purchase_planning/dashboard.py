@@ -1,6 +1,5 @@
 from collections import Counter, defaultdict
 from collections.abc import Iterable, Mapping
-from dataclasses import dataclass
 from datetime import date, timedelta
 from html import escape
 from pathlib import Path
@@ -15,14 +14,16 @@ from purchase_planning.export import REQUIRED_COLUMNS
 from purchase_planning.facts import OrderFlag, PlanFacts, Recommendation, SeasonStatus
 from purchase_planning.methodology import methodology_html
 from purchase_planning.order_sheet import (
-    coverage_text, displayed_order_qty, excess_rows, open_orders_text, order_date_label, rounded_quantity, stock_below_reorder_point,
-    stockout_rows, supplier_orders,
+    coverage_text, excess_rows, open_orders_text, order_date_label, stockout_rows,
+)
+from purchase_planning.orders import (
+    OrderPlan, SupplierSchedule, displayed_order_qty, prepare_orders, rounded_quantity, stock_below_reorder_point,
 )
 from purchase_planning.parameters import STALE_EXPORT_DAYS, STALE_EXPORT_STATUS
 from purchase_planning.replenishment import inventory_summary
 from purchase_planning.sku_labels import category_name
 from purchase_planning.summary import (
-    ORDER_SOON_DAYS, SEASON_SOON_DAYS, PlanSummary, Tile, order_batches, plan_summary, season_deadline,
+    ORDER_SOON_DAYS, SEASON_SOON_DAYS, PlanSummary, Tile, plan_summary, season_deadline,
     season_order_soon, summary_tiles,
 )
 from purchase_planning.wording import days_text, plural
@@ -206,40 +207,6 @@ showView()?.scrollIntoView();
 """
 
 
-@dataclass(frozen=True)
-class Batch:
-    deadline: date
-    quantity: int
-    seasonal: bool
-    low_stock: bool
-
-
-@dataclass(frozen=True)
-class SupplierSchedule:
-    supplier_id: str
-    lines: list[Recommendation]
-    batches: list[Batch]
-    flags: tuple[str, ...]
-
-    @property
-    def deadline(self) -> date:
-        return min(batch.deadline for batch in self.batches)
-
-
-def _supplier_schedules(facts: PlanFacts) -> list[SupplierSchedule]:
-    summaries = {supplier.supplier_id: supplier for supplier in facts.suppliers}
-    schedules = []
-    for supplier, lines, _ in supplier_orders(facts):
-        summary = summaries.get(supplier)
-        batches = []
-        for row in lines:
-            low_stock = stock_below_reorder_point(row)
-            for batch in order_batches(row, summary.next_order_date if summary else None, facts.as_of):
-                batches.append(Batch(batch.deadline, batch.quantity, batch.seasonal, low_stock))
-        schedules.append(SupplierSchedule(supplier, lines, batches, summary.timing.flags if summary else ()))
-    return sorted(schedules, key=lambda row: (row.deadline, row.supplier_id))
-
-
 def _date(day: date | None) -> str:
     return f"{day:%d.%m.%Y}" if day else "—"
 
@@ -359,23 +326,19 @@ def _order_intro(summary: PlanSummary) -> str:
 
 
 def _order_table(
-    facts: PlanFacts, schedules: list[SupplierSchedule], explanations: dict[str, str], labels: Mapping[str, str],
+    facts: PlanFacts, schedules: tuple[SupplierSchedule, ...], explanations: dict[str, str], labels: Mapping[str, str],
     summary: PlanSummary,
 ) -> str:
     rows = []
     for schedule in schedules:
         as_of = facts.as_of
-        low_stock = any(batch.deadline <= as_of and batch.low_stock for batch in schedule.batches)
-        when = order_date_label(schedule.deadline, as_of, date_format="%d.%m.%Y", below_reorder_point=low_stock)
+        when = order_date_label(schedule.deadline, as_of, date_format="%d.%m.%Y", below_reorder_point=schedule.low_stock)
         if not schedule.supplier_id:
             when = "после того, как закупщик назначит поставщика"
         name = escape(schedule.supplier_id or "Поставщик не указан")
         batch_lines = []
-        quantities = Counter()
-        for batch in schedule.batches:
-            # A passed deadline cannot be met any more: every overdue batch is placed now.
-            quantities[batch.seasonal, max(batch.deadline, as_of)] += batch.quantity
-        for (seasonal, deadline), quantity in sorted(quantities.items()):
+        for batch in schedule.placements:
+            seasonal, deadline, quantity = batch.seasonal, batch.deadline, batch.quantity
             label = "Сезонная партия" if seasonal else "Обычная партия"
             batch_date = f"до {_date(deadline)}" if seasonal else _date(deadline)
             if deadline <= as_of:
@@ -525,14 +488,13 @@ def _seasons(facts: PlanFacts, labels: Mapping[str, str], summary: PlanSummary) 
 _MONTHS = ("январь", "февраль", "март", "апрель", "май", "июнь", "июль", "август", "сентябрь", "октябрь", "ноябрь", "декабрь")
 
 
-def _calendar(facts: PlanFacts) -> str:
+def _calendar(facts: PlanFacts, orders: OrderPlan) -> str:
     labels = ("янв.", "февр.", "март", "апр.", "май", "июнь", "июль", "авг.", "сент.", "окт.", "нояб.", "дек.")
     as_of = facts.as_of
     first = as_of.year * 12 + as_of.month - 1
-    next_dates = {supplier.supplier_id: supplier.next_order_date for supplier in facts.suppliers}
     counts: Counter[int] = Counter()
     for row in facts.recommendations:
-        days = (max(as_of, batch.deadline) for batch in order_batches(row, next_dates.get(row.supplier_id), as_of))
+        days = (max(as_of, batch.deadline) for batch in orders.batches_by_sku[row.sku_id])
         counts.update({day.year * 12 + day.month - 1 for day in days})
     months = [divmod(month, 12) for month in range(first, first + 6)]
     values = [counts[year * 12 + month] for year, month in months]
@@ -696,9 +658,10 @@ def write_dashboard(
         "inventory",
         ((f"{name} — {count} SKU", _INVENTORY_HINTS[name]) for name, count in inventory_summary(facts).items()),
     )
-    schedules = _supplier_schedules(facts)
+    orders = prepare_orders(facts)
+    schedules = orders.suppliers
     labels = sku_labels or {}
-    summary = plan_summary(facts)
+    summary = plan_summary(facts, orders)
     overview = _decision(facts, summary, previous_run, changes, explanations.summary if explanations else "", stale=stale)
     order_table = _order_table(facts, schedules, explanations.rows if explanations else {}, labels, summary)
     workspace = (
@@ -710,7 +673,7 @@ def write_dashboard(
         ("seasons", "Сезонные заказы", _seasons(facts, labels, summary)),
     )
     diagnostics = (
-        ("calendar", "Календарь заказов на 6 месяцев, SKU", _calendar(facts)),
+        ("calendar", "Календарь заказов на 6 месяцев, SKU", _calendar(facts, orders)),
         ("forecast-quality", "Качество прогноза", _backtest_quality(facts)),
         ("stock", "Запас", inventory),
         ("segments", "Что делать с ассортиментом", _actions(facts, summary)),

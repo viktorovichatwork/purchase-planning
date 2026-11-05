@@ -4,11 +4,11 @@ from math import fsum, isclose
 
 from purchase_planning.calibration import stock_multiplier
 from purchase_planning.facts import (
-    BacktestResult, CategoryProfile, OrderFlag, PlanFacts, Recommendation, SeasonalOrder, SeasonStatus, Segment,
+    BacktestResult, CategoryProfile, DecisionReason, OrderFlag, PlanFacts, Recommendation, SeasonalOrder, SeasonStatus, Segment,
     SupplierTiming,
 )
 from purchase_planning.inventory import forecast_period, month_shares, project_stock, shift_months
-from purchase_planning.order_sheet import rounded_quantity
+from purchase_planning.orders import rounded_quantity
 
 EXCESS_MONTHS = 12
 SLOW_COVERAGE_MONTHS = 6
@@ -256,8 +256,19 @@ def plan_inventory(
     if excess and has_open_orders:
         order_flags = tuple(sorted((*order_flags, OrderFlag.RESCHEDULE)))
 
+    decision = row.decision
+    if decision is not None:
+        reasons = [reason for reason in decision.reasons if reason not in {
+            DecisionReason.LATE_SEASON, DecisionReason.SMALL_LATE_SEASON,
+        }]
+        if seasonal_order is not None:
+            if seasonal_order.status == SeasonStatus.LATE:
+                reasons.append(DecisionReason.LATE_SEASON)
+            elif seasonal_order.status == SeasonStatus.NOT_RECOMMENDED:
+                reasons.append(DecisionReason.SMALL_LATE_SEASON)
+        decision = replace(decision, reasons=tuple(reasons))
     return replace(
-        row, order_qty=regular_qty + seasonal_qty, order_flags=order_flags, sku_flags=sku_flags, segment=segment,
+        row, decision=decision, order_qty=regular_qty + seasonal_qty, order_flags=order_flags, sku_flags=sku_flags, segment=segment,
         arrival_date=arrival, stock_at_arrival=projection.stock_at_snapshot if arrival is not None else None,
         target_stock=target.target_stock if target else None, safety_stock=target.safety_stock if target else None,
         coverage_months=coverage, stock_until=depletion if coverage is not None else stock_until, order_by=order_by,
