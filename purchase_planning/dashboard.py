@@ -35,6 +35,8 @@ _REPOSITORY_URL = "https://github.com/viktorovichatwork/purchase-planning"
 # Upload form and progress polling (ADR 0007): the Make webhook commits the six CSV to inbox/ of main;
 # the push starts the publish workflow, whose latest run the page polls through the public GitHub API.
 _UPLOAD_URL = "https://hook.us1.make.com/s61yvcvbcciqgad773xol5np91hzgzk4"
+# The export behind the published plan, packed by the publish workflow (absolute: archived run pages link to it too).
+_EXPORT_ZIP_URL = "https://viktorovichatwork.github.io/purchase-planning/erp-export.zip"
 _RUNS_API_URL = (
     "https://api.github.com/repos/viktorovichatwork/purchase-planning/actions/workflows/publish.yml/runs?per_page=1"
 )
@@ -1068,6 +1070,7 @@ ul {{ margin: 0; padding-left: 1.25rem; }}
 <li>
 <h3>Подготовьте шесть CSV</h3>
 <p>Возьмите свежую обезличенную выгрузку из ERP. Проверьте, что в ней есть {csv_files}.</p>
+<p>Нет выгрузки под рукой? <a href="{_EXPORT_ZIP_URL}" download="">Скачайте выгрузку, по которой посчитан текущий план</a> (ZIP с шестью CSV). Её можно изменить и загрузить обратно, чтобы посмотреть, как меняется план.</p>
 <p>Все шесть таблиц выгружайте за один раз и загружайте вместе. Таблицы связаны датой: свежие продажи со старыми остатками исказят заказ, поэтому заменить одну таблицу нельзя.</p>
 </li>
 <li>

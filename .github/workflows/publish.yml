@@ -69,6 +69,10 @@ jobs:
           elif [[ "$status" -ne 0 ]]; then
             exit "$status"
           fi
+          # The export behind the published plan, for visitors who want to try an upload (ADR 0007).
+          last_run="$(find runs -mindepth 2 -maxdepth 2 -name run.json | sort -V | tail -n 1)"
+          plan_source="$(python -c 'import json, sys; print(json.load(open(sys.argv[1])).get("source_revision") or "")' "$last_run")"
+          git archive --format=zip -o "$RUNNER_TEMP/site/erp-export.zip" "${plan_source:-$GITHUB_SHA}" inbox
       - name: Сохранить историю
         run: |
           git add -- runs/
